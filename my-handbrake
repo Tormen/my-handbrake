@@ -1,0 +1,1143 @@
+#!/bin/sh
+
+# 075 == highest used errCode
+
+. "/LINKS/default/my-cmdstrs" || { echo "FAILED [$?] TO ACCESS CMDSTRFILE. EXITING."; exit 1; }
+
+CONF_FILE_GLOBAL="/LINKS/default/my-handbrake.GLOBAL"
+CONF_FILE_LOCAL="/LINKS/default/my-handbrake"
+[ -s "$CONF_FILE_GLOBAL" ] && . "$CONF_FILE_GLOBAL"
+[ -s "$CONF_FILE_LOCAL" ] && . "$CONF_FILE_LOCAL"
+
+DBG="" # can be set via --debug|-D parameter !
+VRB="" # can be set via --verbose|-V parameter !
+DO_CLEANUP="1" # can be UNSET via --leave|-L parameter !
+DO_EJECT="" # can be set via --eject|-E parameter!
+DO_GAP_ANALYSIS=1; # can be unset with --no-gap-analysis parameter!
+
+PWD="$(pwd)" || err 020
+
+NL="
+"
+
+######################################################################
+
+
+usage() {
+  echo "usage: $0 [GLOBAL-PARAMETERS] <MODE> ... <CMD> ...
+
+This script uses 1st CONF_FILE_GLOBAL = '$CONF_FILE_GLOBAL' - if available.
+This script uses 2nd CONF_FILE_LOCAL = '$CONF_FILE_LOCAL' - if available - allowing to overwrite GLOBAL defaults.
+Below we refer to CONF_FILE as either of them.
+
+______________________________________________________________________________________________________
+[GLOBAL-PARAMETERS]
+  --help        Show this text
+  -d|--dry      Only PRINT what /woud/ be done
+  -D|--debug    To turn on DEBUG mode
+  -V|--verbose  To turn on VERBOSE output
+  -L|--leave    Do NOT cleanup. This may leave behind (e.g. when encoding gets interrupted):
+                  * video file(s) - suffixed with '.UNFINISHED'
+                  * logfiles (with HandBrakeCLI output) - suffixed with '.log'
+
+______________________________________________________________________________________________________
+<MODE> can be: file/FILE | dvd/DVD
+
+* file     <VIDEOFILE> [VIDEOFILE [..]] [OPTIONAL-PARAMS] -- <CMD> [CMD_PARAM_1 [CMD_PARAM_2] [..]]
+  Supported [OPTIONAL-PARAMS]   --sub, --audio
+  Supported <CMD>               encode, scan
+  Supported [CMD_PARAMs]        --tag, --ctp, --output-fn
+
+  #OPTIONAL-PARAMS#
+    ### ABOUT SUBTITLE SELECTION ###
+    Without any of the following parameters, \$FILE_SUB defaults to *ALL* available subtitles (of each title) will be selected!
+    --sub <comma-separated-list-of-subtitle-tracks>  -- see the output of --scan, e.g. --sub 1,2 or --sub 2
+      Sets the subtitles to select (if available) for EACH title (and each FILE).
+      The value of this parameter will be available as \$FILE_SUB. Useful e.g. within the MY_CMDSTR_NAME!
+
+    ### ABOUT AUDIO SELECTION ###
+    Without any of the following parameters, \$FILE_AUDIO defaults to *ALL* available audio tracks (of each title) will be selected!
+    --audio <comma-separated-list-of-subtitle-tracks>  -- see the output of '-- scan', e.g. --sub 1,2 or --sub 2
+      Sets the audio tracks to select (if available) for EACH title (and each FILE).
+      The value of this parameter will be available as \$FILE_AUDIO. Useful e.g. within the MY_CMDSTR_NAME!
+
+  #OPTIONAL-PARAMS#
+
+    ### ABOUT OUTPUT-FILENAME + EPISODE/SEASON NUMBERING ###
+    --output-fn <FILE_OUTPUT_FN>
+      If parameter is omitted, then:
+          > IF \$OUTPUT_DIR___FILE (from CONF_FILE) is NOT set (\$OUTPUT_DIR___FILE=\"\"):
+               \$INPUT_PATH_BASE + [ \$FILE_OUTPUT_FN_TAG ] \".\" + \$OUTPUT_SUFFIX
+          > ELSE (\$OUTPUT_DIR___FILE (from CONF_FILE) is set):
+               \$OUTPUT_DIR___FILE + \"/\" + <VIDEOFILE without PATH and without suffix> + [ \$FILE_OUTPUT_FN_TAG ] \".\" + \$OUTPUT_SUFFIX
+      Else:
+          > IF \$OUTPUT_DIR___FILE (from CONF_FILE) is NOT set (\$OUTPUT_DIR___FILE=\"\"):
+               \$FILE_OUTPUT_FN (but making sure that it ends with \$OUTPUT_SUFFIX!)
+          > ELSE (\$OUTPUT_DIR___FILE (from CONF_FILE) is set):
+               \$OUTPUT_DIR___FILE/\${FILE_OUTPUT_FN##*/} (only FILENAME from FILE_OUTPUT_FN, making sure that it ends with \$OUTPUT_SUFFIX!)
+      will be used - note: There is NO space around the \$FILE_OUTPUT_FN_TAG.
+      So in any case this variable will be set (and made available as variable '\$FILE_OUTPUT_FN')!
+      and in any case we will ensure that it ends with \$OUTPUT_SUFFIX!
+      This string might contain the variables '\$OUTPUT_DIR___FILE' (see CONF_FILE!)
+                                              '\$CTP' (see --ctp<file_nr>)
+                                              '\$FILE_NR' / '\$INPUT_IDX' (both same value: number of file-parameter on command-line)
+                                              '\$INPUT_PATH'      (VIDEOFILE #\$FILE_NR as provided on commandline)
+                                              '\$INPUT_PATH_BASE' (INPUT_PATH without SUFFIX (so without the part behind last \. in VIDEOFILE parameter)
+                                              '\$INPUT_FN'        (only FILENAME part of VIDEOFILE)
+                                              '\$INPUT_FN_DIR'    (only DIRECTORY part of VIDEOFILE)
+                                              '\$INPUT_FN_BASE'   (INPUT_FN   without SUFFIX (so without the part behind last \. in \$INPUT_FN))
+                                              '\$OUTPUT_SUFFIX'   (get_output_suffix \$ENCODE_CMDSTR_NAME -- filesuffix of result of ENCODE_CMDSTR)
+      But in order to use variables you need to use SINGLE-QUOTES or you need to escape the '$'!
+
+  Further details about <CMD> and [CMD_PARAMs] NOT explained above: See below with MODE dvd.
+
+* dvd      <DVD_DIR> [OPTIONAL-PARAMS] <CMD> [CMD_PARAM_1 [CMD_PARAM_2] [..]]
+  <DVD_DIR>   -- Is the path to the VIDEO_TS/AUDIO_TS directories!
+                 Also see --dvds param below.
+                 Can contain the VARIABLE-PLACEHOLDER '\$DVD_NR' which will be replaced with dvd-number (as produced by --dvds parameter)
+                 Can contain the VARIABLE-PLACEHOLDER '\$DVD_NR_2' which will be replaced with dvd-number formated with 2 digits
+
+  #OPTIONAL-PARAMS#
+
+    ### ABOUT DVD_DIR ###
+    --dvds <FIRST> <LAST>   -- Parameter can be used multiple times!
+                               All DVD numbers will be collected as space separated list in variable \$DVD_NUMS.
+                               Each parameter will add sequence <FIRST> to <LAST> (result of call to \"seq -s ' ' <FIRST> <LAST>\") to \$DVD_NUMS.
+                               Any --dvds parameter will cause a loop over all \$DVD_NUMS replacing \$DVD_NR/\$DVD_NR_2 in \$DVD_DIR
+                               before doing the provided <CMD>.
+                               So, the current DVD number will be available as variable \$DVD_NR and \$DVD_NR_2.
+                               To select a single DVD you need to provide the SAME <FIRST> and <LAST> !
+
+    ### ABOUT TITLE SELECTION ###
+    # independent of DVD_NR:
+    --no-gap-analysis == do NOT check for a gap of 1 title nr and identical titles BEFORE and AFTER the gap
+                         By default we will DO_GAP_ANALYSIS, as VIDEO DVDs from at least Panasonic TV DVD Recorder
+                         contain all titles 2x with gap of 1 title ! (e.g. Titles 1-10 and 11-21 where 11-21 are identical to 1-10)
+    --all      == consider ALL titles
+    --main     == consider only the \"Main Feature\"
+    --mindur   == minimum duration (>) in the format \"hours{2}:minutes{2}\", e.g. 00:49 (of titles to consider)
+    --maxdur   == maximum duration (<) in the format \"hours{2}:minutes{2}\", e.g. 00:49 (of titles to consider)
+    --titles X == This definitely selects titles and will IGNORE --mindur && --maxdur!
+                  X = STRING as space/or/comma-separated list of title numbers (to consider as well). RANGES 1-3 are also possible! 
+
+    # dependent of DVD_NR:
+    --include == 1 STRING as space/or/comma-separated list of : separated pairs \"<DVD_NR>:<title-to-ignore>\"
+    --exclude == 1 STRING as space/or/comma-separated list of : separated pairs \"<DVD_NR>:<title-to-ignore>\"
+              --exclude SUPERSEEDS --include !
+
+    ### ABOUT OUTPUT-FILENAME + EPISODE/SEASON NUMBERING ###
+    --ctp<title_nr> <custom-target-part-string that will be assigned to \$CTP for title <title_nr>>
+      To have title dependend custom string in variable \$CTP for usage in --output-fn
+      EXAMPLE: --ctp1 <xx> --ctp02 <yy>    ===>    set \$CTP to <xx> for title 1    &&    set \$CTP to <yy> for title 2
+    --tag       <DVD_OUTPUT_FN_TAG>  -- only used if --output-fn is OMITTED ! See --output-fn !
+    --output-fn <DVD_OUTPUT_FN>
+      If parameter is omitted, then:
+          \$OUTPUT_DIR___DVD(from CONF_FILE) + \"/\" + <last part (directory) of DVD_DIR> + \"_\" + [ \$DVD_EPISODE_STR ] + [ \$DVD_OUTPUT_FN_TAG ] + \".\" + \$OUTPUT_SUFFIX
+      will be used - note: There is NO space around the \$DVD_OUTPUT_FN_TAG.
+      So in any case this variable will be set (and made available as variable '\$DVD_OUTPUT_FN')
+      and in any case we will ensure that it ends with \$OUTPUT_SUFFIX!
+      This string might contain the variables '\$OUTPUT_DIR___DVD' (see CONF_FILE!)
+                                              '\$DVD_SEASON', '\$DVD_EPISODE', '\$DVD_EPISODE_STR' (see --episode)
+                                              '\$DVD_NR', '\$DVD_NR_2' (see <DVD_DIR>)
+                                              '\$CTP' (see --ctp<title_nr>)
+                                              '\$TITLE_NR', '\$TITLE_NR_2DIGIT' (current title Nr, or title-nr-formated-as-2-digit-nr)
+                                              '\$TITLE_COUNT', '\$TITLE_COUNT_2DIGIT' (count index of this title Nr, or title-nr-formated-as-2-digit-nr)
+                                              '\$OUTPUT_SUFFIX'   (get_output_suffix \$ENCODE_CMDSTR_NAME -- filesuffix of result of ENCODE_CMDSTR)
+      But in order to use variables you need to use SINGLE-QUOTES or you need to escape the '$'!
+    --episode <SEASON_NR> <EPISODE_NR>
+      This parameter decides how the OUTPUT-FILENAME (\$output) will be differenciated for *each title*
+      using the variable \$DVD_EPISODE_STR:
+         * If omitted and multiple --titles, then \$DVD_EPISODE_STR=\"DVD_#<DVD_NR>_TITLE_#<TITLE>\".
+         * If omitted and single --title, then \$DVD_EPISODE_STR=\"\".
+         * Otherwise: The provided --episode will be used in the FIRST filename as \$DVD_EPISODE_STR=\"S<SEASON_NR>E<EPISODE_NR>\",
+                      then <EPISODE_NR> increases after each title!
+
+    ### ABOUT SUBTITLE SELECTION ###
+    Without any of the following parameters, \$DVD_SUB defaults to *ALL* available subtitles (of each title) will be selected!
+    --sub <comma-separated-list-of-subtitle-tracks>  -- see the output of --scan, e.g. --sub 1,2 or --sub 2
+      Sets the subtitles to select (if available) for EACH title (and each DVD).
+      The value of this parameter will be available as \$DVD_SUB. Useful e.g. within the MY_CMDSTR_NAME!
+
+    ### ABOUT AUDIO SELECTION ###
+    Without any of the following parameters, \$DVD_AUDIO defaults to *ALL* available audio tracks (of each title) will be selected!
+    --audio <comma-separated-list-of-subtitle-tracks>  -- see the output of '-- scan', e.g. --sub 1,2 or --sub 2
+      Sets the audio tracks to select (if available) for EACH title (and each DVD).
+      The value of this parameter will be available as \$DVD_AUDIO. Useful e.g. within the MY_CMDSTR_NAME!
+
+  <CMD> [CMD_PARAM_1 [..]] can be:  ### HERE:NEW-CMD_PARAMS !!!
+
+     custom        DVD MODE:  run DVD_custom  from CONF_FILE (with the variables MODE, DVD_DIR, CMD and the CMD_PARAMS (<CMD>_SOMETHING...) set)
+                   FILE MODE: run FILE_custom from CONF_FILE (with the variables MODE, CMD and the CMD_PARAMS (<CMD>_SOMETHING...) set)
+
+     scan          print raw output of $SCAN_CMD <DVD-DIR>
+
+     titles        print titles (one title per line):
+                     <input_nr(DVD_NR or FILE_NR)> <title_count> <title_nr> <duration(HH:MM)> <audio(comma-separated-list-of-tracks)> <subtitles(comma-separated-list-of-tracks)> <output_fn>
+                   Uses all parameters explained in the section '### ABOUT TITLE SELECTION ###'.
+                   ALL entries except <input_nr> and <subtitles> are mandatory:
+                     <input_nr>  = _ in case no --dvds parameter was provided
+                     <subtitles> = _ in case no subtitles where found
+                   DEPENDENCIES:
+                     <input_nr>    will depend on --dvds parameter [for MODE:DVD], [for MODE:FILE] will be nr of current FILE
+                     <title_count> will depend on selected titles (see: ### ABOUT TITLE SELECTION ###)
+                     <title_nr>    will depend on selected titles (see: ### ABOUT TITLE SELECTION ###)
+                     <duration>    will depend on selected titles (see: ### ABOUT TITLE SELECTION ###, especially --mindur, --maxdur)
+                     <audio>       will depend on selected titles and parameter --audio
+                     <subtitles>   will depend on selected titles and parameter --sub
+                     <output_fn>   will depend on selected titles and parameter --episode   --tag   --ctp<title_nr>    --output-fn
+
+     encode [MY_CMDSTR_NAME] [--force-overwrite]
+            [MY_CMDSTR_NAME]
+                   Defaults to '$MY_DEFAULT_PRESET' (see \$MY_DEFAULT_PRESET in CONF_FILE).
+                   Available MY_CMDSTR_NAME values are:
+$(cat "$CONF_FILE_GLOBAL" "$CONF_FILE_LOCAL"|env LC_ALL=C gawk -b -F '=' '{gsub(/[[:space:]]/, ""); $0=$0; if (/^MY_PRESET_/){print $1}}'|sort|uniq|sed -n 's/^MY_PRESET_/                      /p')
+                   \"MY_PRESET_<MY_CMDSTR_NAME>\" will be the *name* of the variable containting the CMDSTR to use when calling HandBrake!
+                   This variable needs to be defined in CONF_FILE.
+                   You can use the following VARIABLES within the CMDSTR:
+                      * '\$input' ------ the input file/dir ======================= eval of '\$DVD_DIR' [for MODE:DVD], FILE_NAME [for MODE:FILE]
+                      * '\$title' ------ the title ================================ each of the selected TITLES
+                      * '\$output' ----- the output file ========================== eval of the selected TITLES (see output of 'titles' <CMD>)
+                      * '\$subtitles' -- the subtiles (comma-separated list) ====== eval of the selected TITLES (see output of 'titles' <CMD>)
+                      * '\$audio' ------ the audio tracks (comma-separated list) == eval of the selected TITLES (see output of 'titles' <CMD>)
+            [-f|--force-overwrite]
+                   If omitted, then an already existing output file will be SKIPPED!
+                   If provided, then an already existing output file will be overwritten and RE-ENCODED!
+            [-o|--only <GREP-PATTERN>]
+                   If provided, then only TITLES whose OUTPUT_FN match (grep -i, so case-insensitive) this GREP-PATTERN will be encoded.
+            [-q|--quality <QUALITY-NR>]
+                   If provided, this overwrites the default quality \$MY_DEFAULT_QUALITY from CONF_FILE '$MY_DEFAULT_QUALITY'.
+                   Lower value = better quality, but bigger files. Increase/Decrease by 1 or max 2.
+                   Less than 20 should (probably) never be necessary.
+
+
+______________________________________________________________________________________________________
+EXAMPLES:
+
+  //// OF *ONE* (specific) DVD ////
+
+  * Scan complete DVD (listing all available titles, subtitles, audiotracks, ...):
+    my-handbrake dvd '/run/media/me/everything-mobil/der-doktor-und-das-liebe-vieh/21/Der Doktor Und Das Liebe Vieh' scan
+
+  * List all titles (using all available subtitles and all audio tracks for each title):
+    my-handbrake dvd '/run/media/me/everything-mobil/der-doktor-und-das-liebe-vieh/21/Der Doktor Und Das Liebe Vieh' --mindur 00:40 --maxdur 00:59 --main --titles '10 20 21' titles
+
+  //// OF *ALL* DVDs #2 .. #26 ////
+
+  * List all titles between 40 and 59min long excluding dvd-10_title-6 and dvd-10_title-7:
+    my-handbrake dvd '/mnt/everything/der-doktor-und-das-liebe-vieh/\$DVD_NR_2/Der Doktor Und Das Liebe Vieh' --dvds 2 26 --episode 1 4 --mindur 00:40 --maxdur 00:59 --exclude '10:6 10:7' titles
+
+  * Encode all titles between 40 and 59 min long using all available subtitles and audio-tracks for all DVDs #1 .. #26:
+
+    > and skip already existing output files <
+    my-handbrake dvd '/run/media/me/everything-mobil/der-doktor-und-das-liebe-vieh/\$DVD_NR/Der Doktor Und Das Liebe Vieh' --dvds 01 26 --mindur 00:40 --maxdur 00:59' encode --episode 1 1 --output-fn 'Der Doktor Und Das Liebe Vieh \${DVD_EPISODE_STR}.mkv'
+
+    > and FORCE overwriting and re-encoding already existing output files <
+    my-handbrake dvd '/run/media/me/everything-mobil/der-doktor-und-das-liebe-vieh/\$DVD_NR/Der Doktor Und Das Liebe Vieh' --dvds 01 26 --mindur 00:40 --maxdur 00:59' encode --episode 1 1 --output-fn 'Der Doktor Und Das Liebe Vieh \${DVD_EPISODE_STR}.mkv' --force-overwrite
+
+   //// ENCODE TV DVD recordings:
+
+   * WWM - Wer wird Millionaer:
+   yy=2008; nr=741; mi='[MI-015]'; w=/Volumes/SONATA\\ 3; my-handbrake dvd \"\$w\" --titles 1,2,3 --ctp1 \"\$yy-05-09 \$mi [Folge \$nr]\" --ctp2 \"\$yy-05-16 \$mi [Folge \$(( \$nr + 1 ))]\" --ctp3 \"\$yy-05-23 \$mi [Folge \$(( \$nr + 3 ))]\" --ctp4 \"\$yy-05-26 \$mi [Folge \$(( \$nr + 4 ))]\" --output-fn \'\$CTP WWM - Wer wird Millionaer' encode tvDVD --eject
+
+   * Millionenshow:
+   yy=2014; S=\"S14E\"; E=11; nr=760; mi=\"[MI-156]\"; w=/Volumes/DVD_VIDEO_RECORDER\ 2; my-handbrake dvd \"\$w\" --titles 2,3,4 --ctp2 \"\$yy-01-13 \$mi [Folge \$(( \$nr + 0 ))] \$S\$(printf %02d \$(( \$E + 0 )))\" --ctp3 \"\$yy-01-20 \$mi [Folge \$(( \$nr + 1 ))] \$S\$(printf %02d \$(( \$E + 1 )))\" --ctp99 \"\$yy-12-09 \$mi [Folge \$(( \$nr + 2 ))] \$S\$(printf %02d \$(( \$E + 2 )))\" --ctp5 \"\$yy-11-11 \$mi [Folge \$(( \$nr + 3 ))] \$S\$(printf %02d \$(( \$E + 3 )))\" --ctp6 \"\$yy-11-18 \$mi [Folge \$(( \$nr + 4 ))] \$S\$(printf %02d \$(( \$E + 4 )))\" --ctp4 \"\$yy-02-10 \$mi [Promi-Millionenshow 33] [Spezial]\" --output-fn 'Millionenshow \$CTP' --ctp98 \"\$yy-02-10 \$mi [Faschings-Millionenshow \$yy] [Spezial]\" --ctp99 \"\$yy-02-10 \$mi [Die Weihnachts-Millionenshow \$yy] [Spezial]\" encode tvDVD --eject
+
+   * Make use of DO_GAP_ANALYSIS:
+   w=/Volumes/DVD_VIDEO_RECORDER; env mi=\"S-11\" my-handbrake dvd \"\$w\" --all --mindur 00:01 --output-fn 'Schlager \$mi title \$TITLE_COUNT_2DIGIT' encode veryFastAudioPassthrough --eject
+
+   //// FILES:
+   * see media information (audio tracks, subtitle tracks):
+   my-handbrake file mediaFile.mkv -- scan
+
+   * rip all audio + subs:
+   my-handbrake file mediaFile.something.mkv -- encode reencode --output-fn \"mediafile.mkv\"
+
+   * rip only audio track 2:
+   my-handbrake file mediaFile.something.mkv --audio 2 -- encode reencode --output-fn \"mediafile.mkv\"
+"|less
+
+exit 0
+}
+
+
+dbg() { if [ $DBG ]; then if [ $# -eq 0 ]; then echo 1>&2; else local x_=; for x_ in "$@"; do echo "$x_" 1>&2; done; fi; fi; [ 0 -eq 0 ]; }
+vrb() { if [ $VRB ]; then if [ $# -eq 0 ]; then echo; else local x_=; for x_ in "$@"; do echo "$x_"; done; fi; fi; [ 0 -eq 0 ]; }
+
+
+err() { local errCode="$1"; [ -z "$2" ] && local msg="Please fix." || local msg="$2"; [ -z "$3" ] && local exitCode=1 || local exitCode="$3";
+    echo "${NL}ERROR $errCode [$exitCode]: $msg" 1>&2;
+    exit $exitCode;
+}
+
+
+strip_opt_leading_zero() { [ -n "$1" ] && echo "$1"|sed -e 's/^0*//'; }
+format_as_2_digits() { if [ -n "$1" ]; then echo "$1"|env LC_ALL=C gawk -b "{if (/^[0-9]*$/){printf(\"%02d\",\"$1\")}else{printf(\"%s\",\"$1\")}}"; fi; }
+
+eject_cmd() {
+  #DBG=1;
+  #EJECT_CMD="/usr/sbin/diskutil eject \"$DVD_DIR\""
+  #EJECT_CMD_OUTPUT="$( /usr/sbin/diskutil eject "$DVD_DIR" 2>&1 )"; rc=$?;
+  #dbg "eject_cmd(): EJECT RESULT [$rc]: '$EJECT_CMD' '$EJECT_CMD_OUTPUT'";
+  #if [ $rc -ne 0 ]; then
+    DRIVE_LIST="$(drutil list|awk '{if (/^[1-9]/) print $1}')" || err 069; dbg "eject_cmd(): DRIVE_LIST='$(echo "$DRIVE_LIST"|xargs echo)'"
+    DVD_DEVICE="$(mount|sed -n "s|^\(/[^[:space:]][^[:space:]]*\) on $DVD_DIR ([^)]*)$|\1|p")" || err 070; dbg "eject_cmd(): DVD_DEVICE='$DVD_DEVICE'"
+    DVD_DRUTIL_NR=;
+    for a in $DRIVE_LIST; do
+      a_device="$(drutil -drive $a status)" || err 071 "FAILED[$?]: 'drutil -drive $a status'"
+      a_device="$(echo "$a_device"|grep -m1 -o '/dev/disk[0-9]*')"
+      dbg "eject_cmd(): a='$a' a_device='$a_device' DVD_DEVICE='$DVD_DEVICE' eq_test='$( [ "$a_device" = "$DVD_DEVICE" ] )'"
+      [ "$a_device" = "$DVD_DEVICE" ] && DVD_DRUTIL_NR="$a" && break;
+    done
+    dbg "eject_cmd(): after loop over drutil device list: DVD_DRUTIL_NR='$DVD_DRUTIL_NR'"
+    [ -z "$DVD_DRUTIL_NR" ] && err 072 "mount:${NL}$(mount)"
+    EJECT_CMD="/usr/bin/drutil -drive \"$DVD_DRUTIL_NR\" eject"
+    EJECT_CMD_OUTPUT="$( /usr/bin/drutil -drive "$DVD_DRUTIL_NR" eject 2>&1 )"; rc=$?
+  #fi
+  #DBG="";
+  return $rc
+}
+
+
+do_eject() { [ $DO_EJECT ] || return; [ "$1" = "exit" ] && do_exit=1 || do_exit=; msg="$2";
+  echo;
+  echo "  > EJECTING '$DVD_DIR' $2...";
+  eject_cmd; rc="$?"; # last trial
+  if [ $rc -eq 0 ]; then
+    echo "    EJECT SUCCESSFUL";
+    if [ $do_exit ]; then vrb; vrb "All done - successfully"; vrb; exit 0; fi
+    return 0
+  else
+    echo "    EJECT FAILED [$rc]: $EJECT_CMD${NL}$EJECT_CMD_OUTPUT";
+    if [ $do_exit ]; then exit $rc; fi
+    return 1;
+  fi
+}
+
+
+
+
+get_scan() {
+  dbg "get_scan(): \"$c_HandBrakeCLI\" -t 0 -i \"$INPUT_PATH\" 2>&1"
+  "$c_HandBrakeCLI" -t 0 -i "$INPUT_PATH" 2>&1
+}
+
+
+
+
+# do_echo controls if resulting lines will be printed or not
+# in any case the 2 GLOBAL VARIABLES:   TITLES_LIST
+#                                       TITLES_LIST_CNT    will be set!
+# Used in both DVD and FILE mode !
+# In FILE mode this uses simply $OUTPUT_PATH to set '\$output' in the ENCODE STRING
+#
+# Uses $DO_GAP_ANALYSIS to decide if it will check for a gap of 1 title and identical titles BEFORE and AFTER the gap
+# as this seems a common pattern in DVDs from TV recorders!
+#
+get_titles() { local do_not_echo_filtered_titles="$1"; local do_not_echo_ALL_titles="$2";
+  local output_fn=;
+  local raw="$( get_scan )"
+  dbg "DBG get_titles: raw:" "$raw" "DBG: ^^^^^^^^^^^^^^^^^^^^^";
+  local raw_titles="$( echo "$raw"|env LC_ALL=C gawk -b '/^[+] title [1-9][0-9]*/{flag=1;print $0; next}/^HandBrake has exited.$/{flag=0}flag' )"
+  dbg "DBG get_titles: raw_titles:" "$raw_titles" "DBG: ^^^^^^^^^^^^^^^^^^^^^";
+  local titles="$(echo "$raw_titles"|sed -n 's/[+] title \([1-9][0-9]*\):.*/\1/p'|sort -n|xargs echo)" #sed cannot issue 00 !?! |env LC_ALL=C gawk -b '{if (!/00/)print $0}')"
+  dbg "DBG get_titles: Found titles: '$titles'";
+  [ -z "$titles" ] && err 011 "Problem extracting titles. Check with 'scan'."
+
+  local use=;
+  local input_nr=; case "$MODE" in DVD) input_nr="$DVD_NR"; TITLES_LIST_HEADER="DVD_NR";; FILE) input_nr="$FILE_NR"; TITLES_LIST_HEADER="FILE_NR";; esac
+  ALL_TITLES_LIST_HEADER="$TITLES_LIST_HEADER$( printf "\ttitleNr\tdur.\taudio\tsub\n" )"
+  TITLES_LIST_HEADER="$TITLES_LIST_HEADER$( printf "\ttitlCnt\ttitleNr\tdurat.\taudio\tsub\toutput_fn\n" )"
+  [ -z "$input_nr" ] && err 081 "MODE='$MODE', DVD_NR='$DVD_NR', FILE_NR='$FILE_NR'"
+
+  [ "$MODE" = "FILE" ] && do_not_echo_ALL_titles="1";
+
+  if [ -z "$do_not_echo_ALL_titles" ]; then
+    # count *ALL* (available) titles:
+    local all_titles_cnt=0; for title_nr in $titles; do all_titles_cnt=$(( $all_titles_cnt + 1 )); done
+    [ $all_titles_cnt -eq 0 ] && err 055 "NO TITLES found ?! Please check";
+    echo ">>> ALL $all_titles_cnt TITLES: $titles of '$DVD_DIR'${NL}$ALL_TITLES_LIST_HEADER";
+  fi
+
+  TITLES_LIST=;          # GLOBAL-VARIABLE! -- like ECHO_TITLES_LIST, but FILENAME is on separate line (instead in last column)
+  TITLES_LIST_CNT=0;     # GLOBAL-VARIABLE! -- counts only *use*d titles !!
+  SELECTED_TITLE_NRS=""; # GLOBAL-VARIABLE!
+  ECHO_TITLES_LIST="";   # GLOBAL-VARIABLE -- like TITLES_LIST, but all in 1 LINE !
+
+  local all_titles_str=""
+  local dbgPfx="DBG get_titles: input_nr:'$input_nr' (${MODE}_NR) "
+  local gap_cnt=0; local gap_at_title_nr=; local last_title_nr=0;
+                   local title_list_after_gap=;  local title_list_after_gap_cnt=0;  local title_nrs_after_gap=;  local echo_title_list_before_gap=;
+                   local title_list_before_gap=; local title_list_before_gap_cnt=0; local title_nrs_before_gap=; local echo_title_list_after_gap=;
+  local TITLE_COUNT=0; local title_count_before_gap=;
+
+  for TITLE_NR in $titles; do
+     TITLE_COUNT=$(( $TITLE_COUNT + 1 ));
+     # extract variables for this TITLE with $TITLE_NR:
+     this_title="$(echo "$raw_titles"|sed -n "/^+ title $TITLE_NR:/,/^+ title [0-9][0-9]*/p")"
+     dbg; dbg "${dbgPfx}TITLE_NR:'$TITLE_NR' (potential TITLE_COUNT=$TITLE_COUNT (if we keep this title)) --> this_title='''$this_title'''"
+     [ -z "$this_title" ] && err 075
+
+     if [ $DO_GAP_ANALYSIS -eq 1 ]; then
+       tmp_nr="$(( $last_title_nr + 1 ))" || err 076
+       dbg "${dbgPfx}DO_GAP_ANALYSIS: gap_cnt='$gap_cnt' :: last_title_nr='$last_title_nr', TITLE_NR='$TITLE_NR' -> tmp_nr='$tmp_nr'"
+       if [ $tmp_nr -eq $TITLE_NR ]; then
+         dbg "${dbgPfx}DO_GAP_ANALYSIS: TITLE_NR='$TITLE_NR': NO GAP detected (last_title_nr='$last_title_nr')"
+       else # GAP DETECTED !
+         gap_cnt="$(( $gap_cnt + 1 ))";
+         dbg "${dbgPfx}DO_GAP_ANALYSIS: TITLE_NR='$TITLE_NR': GAP #$gap_cnt detected at TITLE Nr '$tmp_nr' (last_title_nr='$last_title_nr')"
+         gap_at_title_nr=$tmp_nr;
+         title_list_before_gap="$TITLES_LIST"; title_list_before_gap_cnt="$TITLES_LIST_CNT"
+         title_count_before_gap="$(( $TITLE_COUNT - 1 ))"
+         title_nrs_before_gap="$SELECTED_TITLE_NRS"
+         echo_title_list_before_gap="$ECHO_TITLES_LIST"
+       fi
+     fi
+
+     TITLE_NR_2DIGIT="$(format_as_2_digits "$TITLE_NR")"
+     TITLE_COUNT_2DIGIT="$(format_as_2_digits "$TITLE_COUNT")"
+     duration="$(echo "$this_title"|sed -n 's/.* + duration: \([0-9][0-9]:[0-9][0-9]\):[0-9][0-9]$/\1/p')"
+     audio="$(echo "$this_title"|sed -n '/^  + audio tracks:/,/^\(  \)\?+ /p'|sed -n 's/^    + \([1-9][0-9]*\).*/\1/p'|xargs echo|env LC_ALL=C gawk -b '{gsub(" ",","); print $0}' )"
+     sub="$(echo "$this_title"|sed -n '/^  + subtitle tracks:/,/^\(  \)\?+ /p'|sed -n 's/^    + \([1-9][0-9]*\).*/\1/p'|xargs echo|env LC_ALL=C gawk -b '{gsub(" ",","); print $0}' )"
+     use=""; case "$MODE" in FILE) use=1;; DVD) DVD_decideIfTitleIsSelected && use=1;; esac
+     [ -z "$sub" ] && { sub=_; dbg "WARNING: title $TITLE_NR: No subtitles found!"; }
+     #There CAN be no-audio [ -z "$audio" ] && err 025 "Missing value for 'audio'. No sound ??"
+     [ -z "$duration" ] && err 026 "Missing value for 'duration'. No duration ??"
+
+     dbg "${dbgPfx}TITLE_NR:'$TITLE_NR' duration:'$duration' audio:'$audio' subtitles:'$sub' -- use='$use'";
+
+     # first ensure to print title - if we should echo_ALL_titles:
+     [ -z "$do_not_echo_ALL_titles" ] && printf "$input_nr\t$TITLE_NR\t$duration\t$audio\t$sub\n"
+
+     # continue if we should /use/ this TITLE:
+     [ -z "$use" ] && last_title_nr="$TITLE_NR" && TITLE_COUNT=$(( $TITLE_COUNT - 1 )) && continue;
+
+     # set output_fn + MODE specifics (e.g. set/overwrite some values)
+     case "$MODE" in
+       FILE)
+         output_fn="$OUTPUT_PATH";
+
+         # overwrite audio ?
+         [ -n "$FILE_AUDIO" ] && { audio="$FILE_AUDIO"; dbg "DBG get_titles: Using \$FILE_AUDIO '$FILE_AUDIO'."; }
+
+         # overwrite sub ?
+         [ -n "$FILE_SUB" ] && { sub="$FILE_SUB"; dbg "DBG get_titles: Using \$FILE_SUB '$FILE_SUB'."; }
+
+         ;;
+       DVD)
+         # overwrite audio ?
+         [ -n "$DVD_AUDIO" ] && { audio="$DVD_AUDIO"; dbg "DBG get_titles: Using \$DVD_AUDIO '$DVD_AUDIO'."; }
+
+         # overwrite sub ?
+         [ -n "$DVD_SUB" ] && { sub="$DVD_SUB"; dbg "DBG get_titles: Using \$DVD_SUB '$DVD_SUB'."; }
+
+         # set DVD_EPISODE_STR:
+         if [ -z "$DVD_EPISODE" ]; then
+           DVD_EPISODE_STR="TITLE_#${TITLE_NR}"; [ -n "$DVD_NR_2" ] && DVD_EPISODE_STR="DVD_#${DVD_NR_2}_${DVD_EPISODE_STR}"
+         else
+           case $all_titles_cnt in 1) DVD_EPISODE_STR="" ;;
+                                   *) DVD_EPISODE_STR="S$(format_as_2_digits "$DVD_SEASON")E$(format_as_2_digits "$DVD_EPISODE")"
+                                      DVD_EPISODE=$(( $DVD_EPISODE + 1 ));
+                                      dbg "DBG get_titles: DVD_EPISODE_STR='$DVD_EPISODE_STR' && increased DVD_EPISODE to '$DVD_EPISODE'" ;;
+           esac;
+         fi;
+
+         # prepare '$CTP' with TITLE SPECIFIC string for this TITLE_NR ! (see --ctp<TITLE_NR>)
+         eval "CTP=\"\$CTP$TITLE_NR\"" && dbg "DBG get_titles: Using \$CTP '$CTP' (from CTP$TITLE_NR).";
+
+         # set output_fn:
+         dbg "DBG get_titles: eval \"output_fn='$DVD_OUTPUT_FN'\""
+         eval "output_fn=\"$DVD_OUTPUT_FN\"";
+         if [ $DO_GAP_ANALYSIS -eq 1  -a  $gap_cnt -eq 1 ]; then # VIDEO DVDs from Panasonic TV DVD Recorder show each title 2x with gap of 1 title !
+           corresponding_title_nr_before_gap="$(( $TITLE_NR - $gap_at_title_nr ))" || err 077
+           corresponding_title_count_before_gap="$(( $TITLE_COUNT - $title_count_before_gap ))" || err 078
+           dbg "${dbgPfx}DO_GAP_ANALYSIS: TITLE_NR='$TITLE_NR', gap_at_title_nr='$gap_at_title_nr' -> corresponding_title_nr_before_gap='$corresponding_title_nr_before_gap', corresponding_title_count_before_gap='$corresponding_title_count_before_gap'"
+           tmp_nr=$TITLE_NR; tmp_count=$TITLE_COUNT; tmp_nr_2digit=$TITLE_NR_2DIGIT; tmp_count_2digit=$TITLE_COUNT_2DIGIT; # <<< BACKUP
+           TITLE_NR="$corresponding_title_nr_before_gap";       TITLE_NR_2DIGIT="$(format_as_2_digits "$TITLE_NR")"
+           TITLE_COUNT="$corresponding_title_count_before_gap"; TITLE_COUNT_2DIGIT="$(format_as_2_digits "$TITLE_COUNT")"
+           eval "corresponding_output_fn=\"$DVD_OUTPUT_FN\"";
+           TITLE_NR=$tmp_nr; TITLE_COUNT=$tmp_count; TITLE_NR_2DIGIT=$tmp_nr_2digit; TITLE_COUNT_2DIGIT=$tmp_count_2digit; # <<< RESTORE
+         fi
+         ;;
+     esac
+
+     dbg "${dbgPfx}TITLE_NR:'$TITLE_NR' duration:'$duration' audio:'$audio' subtitles:'$sub' output_fn='$output_fn' -- use='$use'";
+
+     dbg "${dbgPfx}\"input_nr\" \"TITLE_COUNT\" \"TITLE_NR\" \"duration\" \"audio\" \"sub\"" # audio_tracks sub_tracks
+     dbg "${dbgPfx}\"output_fn\""
+     res="$(printf "$input_nr\t$TITLE_COUNT\t$TITLE_NR\t$duration\t$audio\t$sub\n$output_fn\n")";
+     [ -z "$TITLES_LIST" ] && TITLES_LIST="$res" || TITLES_LIST="$TITLES_LIST${NL}$res"
+     echo_res="$(printf "$input_nr\t$TITLE_COUNT\t$TITLE_NR\t$duration\t$audio\t$sub\t$output_fn\n")";
+     [ -z "$ECHO_TITLES_LIST" ] && ECHO_TITLES_LIST="$echo_res" || ECHO_TITLES_LIST="$ECHO_TITLES_LIST${NL}$echo_res"
+     TITLES_LIST_CNT=$(( $TITLES_LIST_CNT + 1 ));
+     [ -z "$SELECTED_TITLE_NRS" ] && SELECTED_TITLE_NRS="$TITLE_NR" || SELECTED_TITLE_NRS="$SELECTED_TITLE_NRS $TITLE_NR"
+
+     if [ $DO_GAP_ANALYSIS -eq 1  -a  $gap_cnt -eq 1 ]; then # VIDEO DVDs from Panasonic TV DVD Recorder show each title 2x with gap of 1 title !
+       dbg "${dbgPfx}DO_GAP_ANALYSIS: GAP_CNT == 1 --> collecting titles AFTER GAP"
+       res="$(printf "$input_nr\t$corresponding_title_count_before_gap\t$corresponding_title_nr_before_gap\t$duration\t$audio\t$sub\n$corresponding_output_fn\n")";
+       echo_res="$(printf "$input_nr\t$corresponding_title_count_before_gap\t$corresponding_title_nr_before_gap\t$duration\t$audio\t$sub\t$corresponding_output_fn\n")";
+       [ -z "$title_list_after_gap" ] && title_list_after_gap="$res" || title_list_after_gap="$title_list_after_gap${NL}$res"
+       [ -z "$echo_title_list_after_gap" ] && echo_title_list_after_gap="$echo_res" || echo_title_list_after_gap="$echo_title_list_after_gap${NL}$echo_res"
+       title_list_after_gap_cnt=$(( $title_list_after_gap_cnt + 1 ));
+       [ -z "$title_nrs_after_gap" ] && title_nrs_after_gap="$TITLE_NR" || title_nrs_after_gap="$title_nrs_after_gap $TITLE_NR"
+     fi;
+     last_title_nr="$TITLE_NR"
+  done
+  dbg "${dbgPfx}AFTER LOOP OVER ALL TITLES: TITLES_LIST_CNT='$TITLES_LIST_CNT', SELECTED_TITLE_NRS='$SELECTED_TITLE_NRS'"
+
+  if [ $TITLES_LIST_CNT -eq 0 ]; then
+    vrb;
+    echo "WARNING: No titles found. Please check your TITLES selection parameters (e.g. --titles, --all, --mindur, --maxdur)" 1>&2
+    return 0;
+  fi
+
+  if [ $DO_GAP_ANALYSIS -eq 1 ]; then
+    dbg "${dbgPfx}DO_GAP_ANALYSIS: RESULT: gap_cnt='$gap_cnt', gap_at_title_nr='$gap_at_title_nr', title_list_before_gap_cnt='$title_list_before_gap_cnt', title_list_after_gap_cnt='$title_list_after_gap_cnt'"
+    dbg "${dbgPfx}DO_GAP_ANALYSIS: RESULT: title_list_before_gap:${NL}$title_list_before_gap${NL}^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"
+    dbg "${dbgPfx}DO_GAP_ANALYSIS: RESULT: title_list_after_gap:${NL}$title_list_after_gap${NL}^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"
+
+    if [ $gap_cnt -eq 1 ]; then
+      dbg "${dbgPfx}DO_GAP_ANALYSIS: GAP_CNT == 1 --> checking for symmetric titles BEFORE + AFTER gap:"
+      if [ "$title_list_before_gap_cnt" = "$title_list_after_gap_cnt"  -a  "$title_list_before_gap" = "$title_list_after_gap" ]; then
+        [ $all_titles_cnt -ge $gap_at_title_nr ] || err 074 "all_titles_cnt='$all_titles_cnt' should be EQUAL or LARGER than gap_at_title_nr='$gap_at_title_nr', ";
+        vrb ">>> DO_GAP_ANALYSIS --> WARNING :: IGNORING $title_list_after_gap_cnt TITLES '$title_nrs_after_gap'  AFTER GAP at title nr '$gap_at_title_nr'! (only keeping titles $title_nrs_before_gap)"
+        TITLES_LIST="$title_list_before_gap";
+        TITLES_LIST_CNT="$title_list_before_gap_cnt";
+        SELECTED_TITLE_NRS="$title_nrs_before_gap"
+        ECHO_TITLES_LIST="$echo_title_list_before_gap"
+      else
+        # TITLES_LIST can stay as it is!
+        dbg "${dbgPfx}DO_GAP_ANALYSIS: GAP_CNT == 1, but title_list_before_gap does NOT match title_list_after_gap! -> NOT reducing TITLES SELECTION because of GAP!"
+      fi
+    fi
+  fi;
+
+  [ -z "$do_not_echo_filtered_titles" ] && echo ">>> $TITLES_LIST_CNT $( [ "$MODE" = "DVD" ] && echo "FILTERED TITLE(S): $SELECTED_TITLE_NRS of '$DVD_DIR'" || echo "FILE(s)" ):${NL}$TITLES_LIST_HEADER${NL}$ECHO_TITLES_LIST";
+  [ $DBG ] && echo "${NL}^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^";
+  [ 1 -eq 1 ]
+}
+
+
+# context = "title #21 (4/5)"
+#
+encode() { local context="$1"; local cmdstr_name="$2";
+           local input="$3"; local output="$4"; local title="$5"; local subtitles="$6"; local audio="$7";  local quality="$8"; # <<< these variable names are needed for eval and represent the possible variable names in cmdstr_4_eval !
+  NOW="$(date +"%Y-%m-%d %H-%M-%S")";
+  # if only FILEname-part-of-$output == $output --> we have NO path as part of $output:
+  [ "${output##*/}" = "$output" ] && local logfile="$PWD/$output $NOW.log" || local logfile="$output $NOW.log" 
+  unset subtitles;
+  local cmdstr_verb="$( cat - <<__HIHAH__
+$( eval "echo \"\$$cmdstr_name\"" )
+__HIHAH__
+)"
+  #local cmdstr_4_eval="unbuffer $( cat - <<__HIHAH__
+  local cmdstr_4_eval="stdbuf -i0 -o0 -e0 $( cat - <<__HIHAH__
+$( eval "echo \"\$$cmdstr_name\""|env LC_ALL=C gawk -b '{if (!/^[[:space:]]*#/ && !/^[[:space:]]*$/){sub(/###.*$/,"");print $0}}'|xargs echo )
+__HIHAH__
+)"
+
+  ### PARAMETER TUNING:
+  [ "$MODE" = "FILE" -o -z "$title" ]       && cmdstr_4_eval="$(echo "$cmdstr_4_eval"|sed -e 's/ --title / /')";     # REMOVE PARAM --title (in FILE mode or without $title)
+  [ "$MODE" != "DVD" ]                      && cmdstr_4_eval="$(echo "$cmdstr_4_eval"|sed -e 's/ --no-dvdnav / /')"; # REMOVE PARAM --no-dvdnav (NOT DVD mode)
+
+  [ "$audio" = "_" -o -z "$audio" ]         && cmdstr_4_eval="$(echo "$cmdstr_4_eval"|sed -e 's/ --audio "$audio"/ --all-audio/')"; # ALL audio tracks!
+  [ "$subtitles" = "_" -o -z "$subtitles" ] && cmdstr_4_eval="$(echo "$cmdstr_4_eval"|sed -e 's/ --subtitle "$subtitles"/ --all-subtitles/')"; # ALL subs
+
+  dbg "DBG encode: $context -- CMDSTR_verb=${NL}$cmdstr_verb<<<<<<<<<<<<<<<${NL}^^^^^^^^^^^^^^^^^^^^^^^^^^^";
+  dbg "DBG encode: $context"
+  [ $DBG ] && printf "DBG: cmdstr_4_eval='%s'\n" "$cmdstr_4_eval";
+
+  output_orig="$output"
+  output="$output_orig.UNFINISHED"
+
+  if [ $DBG ]; then
+    local used_variables="$( echo "$cmdstr_4_eval"| sed -u -n 's/[^$]*$\([a-zA-Z_][a-zA-Z_0-9]*\)[^$]*/\1 /pg'| xargs echo )"
+    dbg "DBG encode $context: Extracting all used_variables='$used_variables'"
+    dbg ">>> encode: eval \"$cmdstr_4_eval\"";
+    [ -n "$used_variables" ] && { dbg "            VARIABLES:"; for v in $used_variables; do dbg "                $v = \"$(eval "echo \"\$$v\"")\""; done; }
+  fi;
+
+  if [ $DRY_RUN ]; then
+    echo "  > Would run: \"$( eval "echo \"$cmdstr_4_eval\"" )\" && mv \"$output\" \"$output_orig\""
+  else
+    [ -z "$TEMPFILES" ] && TEMPFILES="$output" || TEMPFILES="$TEMPFILES${NL}$output"
+
+    #if [ $VRB ]; then # ALWAYS PRINT the CMD:
+      [ -z "$DO_CLEANUP" ] && tmp=" (leaves '$output' behind, if it fails)" || tmp=;
+      tmp="$(echo "$cmdstr_4_eval"|sed -u -e 's/"/\\"/g')" # quote the parameters!
+      dbg "DBG encode cmdstr_4_eval='${tmp}'";
+      if [ -z "$DBG" ]; then
+        now="$(date +"%Y-%m-%d_%H%M.%S")";
+        if [ -z "$VRB" ]; then
+          eval "echo \"  > $now | encode via: $tmp\"" | tee "$logfile" || err 056 "FAILED to create logfile '$logfile'. Please check."
+          echo "  > $now | less +F '$logfile'";
+        else # DBG="", VRB=1
+          eval "echo \"  > $now | encode via: $tmp\"" | tee "$logfile" || err 056 "FAILED to create logfile '$logfile'. Please check."
+          echo "    To see progress:${NL}    less +F '$logfile'";
+        fi
+      else
+        eval "echo \"  > $(date +"%Y-%m-%d_%H%M.%S") | encode via: $tmp\""
+      fi
+    #fi;
+
+    rc_file="/tmp/my-handbrake.$$.handbrakeCLI-call.rc"
+    echo "0" > "$rc_file" || err 061 # by default return code is 0
+
+    if [ $DBG ]; then
+      eval "$cmdstr_4_eval 2>&1 || echo \"\$?\" > \"$rc_file\""|env LC_ALL=C gawk -b '{gsub(/[\r]/,"\n");print $0;fflush()}'| tee -a "$logfile";
+    else
+      eval "$cmdstr_4_eval 2>&1 || echo \"\$?\" > \"$rc_file\""|env LC_ALL=C gawk -b '{gsub(/[\r]/,"\n"); if ($0 ~ /libdvdread: CHECK_VALUE failed in /) next; print $0;fflush()}' >> "$logfile";
+    fi;
+
+    [ -s "$rc_file" ] || err 062 "rc_file='$rc_file'"
+    rc=$(( $(cat "$rc_file") )) || err 063 "rc_file='$rc_file'"
+    echo "RC='$rc'" >>"$logfile" || err 066
+    [ -n "$rc" ] || err 064 "rc_file='$rc_file'"
+    /bin/rm "$rc_file" || err 065 "rc_file='$rc_file'"
+    [ -z "$DO_CLEANUP" ] && tmp=" - leaving output '$output' behind" || tmp=" - output '$output_orig'";
+    if [ "$rc" != "0" ]; then err 001 "$(date +"%Y-%m-%d_%H%M.%S") FAILED [$rc] to encode $context$tmp!"; fi
+    tmpstr="  > $(date +"%Y-%m-%d_%H%M.%S") | Successfully done with encode $context!"
+    echo "$tmpstr" >> "$logfile"
+    TEMPFILES="$TEMPFILES${NL}$logfile" # only do this here to KEEP logfile in case of FAILURE :)
+
+    mv "$output" "$output_orig" || err 010 "Failed to move '$output' -> '$output_orig'. Not sure why :/"
+    TEMPFILES="$(echo "$TEMPFILES"|env LC_ALL=C gawk -b -v "x=$output" '{if ($0 !=x)print $0}')"
+    cp "$logfile" "$LAST_LOGFILE" || err 032
+    dbg "DBG encode $context: Done (successfully) with encode! TEMPFILES='$TEMPFILES'"
+    echo "$tmpstr Logfile:    less '$LAST_LOGFILE'"
+    dbg "DBG sleeping 3 to increase probability that eject works (??)"
+    sleep 3;
+  fi
+}
+
+
+
+get_encode() {
+
+  NOW="$(date +"%Y-%m-%d %H-%M-%S")";
+  local tmpFile="/tmp/my-handbrake_${NOW}_$$___encode____titles.log"
+
+  [ -z "$TEMPFILES" ] && TEMPFILES="$tmpFile" || TEMPFILES="$TEMPFILES${NL}$tmpFile"
+
+  #get_titles "do_not_echo_filtered_titles" || err 021 "Failed to call get_titles."
+  get_titles || err 057 "Failed to call get_titles."
+  echo "$TITLES_LIST" >"$tmpFile"   || err 022 "Failed to create tempfile '$tmpFile'."
+  [ "$(cat "$tmpFile")" = "$TITLES_LIST" ] || err 023 "Missmatch found between content of tempfile '$tmpFile':
+@@@$(cat "$tmpFile")@@@
+and the TITLES_LIST variable:
+@@@$TITLES_LIST@@@"
+
+  dbg "=================================================================================";
+  dbg "DBG get_encode: TEMPFILES=@@@$TEMPFILES@@@ TITLES_LIST_CNT='$TITLES_LIST_CNT' TITLES_LIST=
+$(cat "$tmpFile")
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"
+
+  # parameter for encode():
+  local context=; local cmdstr_name=; local input=; local output=;
+  local input_nr=; local title_nr=; local duration=; local audio=; local subtitles=; local output_fn=;
+  local input_nr_2="$(format_as_2_digits $input_nr)";
+  local i=0;
+  while read input_nr title_count title_nr duration audio subtitles <&3; do
+    read output_fn <&3 || err 034
+    i=$(( $i + 1 ));
+    dbg; dbg "___________________________________________________________________________________________________________________________________________";
+    dbg "DBG get_encode: [LOOP i=$i] input_nr='$input_nr'(${MODE}_NR) title_count='$title_count' title_nr='$title_nr' duration='$duration' audio='$audio' subtitles='$subtitles' output_fn='$output_fn'";
+
+    [ "$subtitles" = "_" ] && subtitles=;
+
+    input_nr_2=$(format_as_2_digits "$input_nr");
+
+    #OLD: context="DVD $INPUT_IDX/$TOTAL_INPUT_CNT (#${input_nr_2}) - title $i/$TITLES_LIST_CNT (#${title_nr})"
+    #OLD: context="FILE $FILE_NR/$TOTAL_INPUT_CNT ($input_fn -> $output_fn)"
+    context="${MODE} $INPUT_IDX/$TOTAL_INPUT_CNT (#${input_nr_2}) - title $i/$TITLES_LIST_CNT (#${title_nr})"
+    cmdstr_name="MY_PRESET_${ENCODE_CMDSTR_NAME}"
+    input="$INPUT_PATH"    # globally set
+    output="$output_fn" # from get_titles
+    quality="$ENCODE_QUALITY"
+
+    echo ">>> $context $duration..."; dbg
+    [ "$MODE" = "FILE" ] && echo "   '$INPUT_PATH'"
+    if [ -n "$ENCODE_ONLY" ]; then
+      if echo "$output_fn"|grep -iq "$ENCODE_ONLY"; then
+          [ $VRB ] && vrb "  > Encoding because output_fn '$output_fn' *IS* matching ENCODE_ONLY grep pattern '$ENCODE_ONLY' (provided by --only)!"
+      else
+          [ $VRB ] && vrb "  > Skipping output_fn '$output_fn' *NOT* matching ENCODE_ONLY grep pattern '$ENCODE_ONLY' (provided by --only)!" || echo "  > Skipping..."
+          continue;
+      fi
+    fi
+    if [ -e "$output" ]; then # this is a feature, not a bug (to NOT use [ -s ... ] because we might touch encoded files to keep a record after we moved them on to bigger storage
+      if [ -z "$ENCODE_FORCE_OVERWRITE_EXISTING" ]; then # skip if $output exists!
+        echo "  > Skipping already existing '$output'!"
+        continue;
+      else
+        echo "  > You provided --force-overwrite --> REMOVING OLD file '$output'";
+        rm "$output" || err 019 "Failed to remove existing output file '$output'. We tried to remove, as --force-overwrite was set."
+      fi;
+    fi;
+    dbg "DBG get_encode: [LOOP i=$i] encode context='$context' cmdstr_name='$cmdstr_name' input='$input' output='$output' title='$title_nr' subtitles='$subtitles' audio='$audio' quality='$quality'"
+    #[ -z "$DO_CLEANUP" ] && tmp=" -- leaves '$output'.UNFINISHED behind, if it fails!" || tmp=;
+    #echo "encode \"$context\" \"$cmdstr_name\" \"$input\" \"$output\" \"$title_nr\" \"$subtitles\" \"$audio\" \"$quality\"$tmp"
+    encode "$context" "$cmdstr_name" "$input" "$output" "$title_nr" "$subtitles" "$audio" "$quality"
+    rc=$?
+    dbg "DBG get_encode: [LOOP i=$i] encode context='$context': DONE [RC=$rc] - TEMPFILES='$TEMPFILES'".
+  done 3<"$tmpFile"
+  # </dev/null, because: HandBrakeCLI reads stdin (probably to check if interactive shell, because with </dev/null, the progress output disappears)
+  # SEE: http://mywiki.wooledge.org/BashFAQ/089
+
+  rm -f "$tmpFile" || err 024 "Failed removing tempfile '$tmpFile'."
+  TEMPFILES="$(echo "$TEMPFILES"|env LC_ALL=C gawk -b -v "x=$tmpFile" '{if ($0!=x)print $0}')"
+
+  dbg "DBG get_encode: DONE (with LOOP) [RC=$rc] - TEMPFILES='$TEMPFILES'"
+  return $rc
+}
+
+
+# returns 0 if we USE the title $TITLE_NR --> DVD_decideIfTitleIsSelected && use=1
+DVD_decideIfTitleIsSelected() {
+  dbg "DBG DVD_decideIfTitleIsSelected(): TITLE_NR='$TITLE_NR', duration='$duration' -- Using DVD_ALL_TITLES='$DVD_ALL_TITLES' DVD_MAIN_TITLE='$DVD_MAIN_TITLE' DVD_TITLE_MINDUR='$DVD_TITLE_MINDUR' DVD_TITLE_MAXDUR='$DVD_TITLE_MAXDUR' DVD_TITLES='$DVD_TITLES' DVD_TITLES_INCLUDE='$DVD_TITLES_INCLUDE' DVD_TITLES_EXCLUDE='$DVD_TITLES_EXCLUDE'";
+
+  use=;
+  if [ -n "$DVD_TITLES" ]; then
+    for b in $DVD_TITLES; do [ "$b" = "$TITLE_NR" ] && use=1 && break; done
+    dbg "DBG DVD_decideIfTitleIsSelected(): TITLE_NR='$TITLE_NR' -- use='$use' after loop over '$DVD_TITLES'"
+    [ $use ] && return 0;
+  fi;
+
+  if [ $DVD_MAIN_TITLE ]; then
+    echo "$this_title"|env LC_ALL=C gawk -b -v "w=  + Main Feature" '$0==w{found=1;exit;}END{if (found==1){exit 0}else{exit 1}}' && use=1;
+    dbg "DBG DVD_decideIfTitleIsSelected(): TITLE_NR='$TITLE_NR' -- DVD_MAIN_TITLE --> use='$use'"
+    if [ $use ]; then
+      vrb "  > CONSIDERING DVD#$DVD_NR:title#$TITLE_NR (through parameter --main)";
+    fi
+  fi
+
+  if [ -n "$DVD_TITLES_INCLUDE" ]; then
+    echo " $DVD_TITLES_INCLUDE "|env LC_ALL=C gawk -b -v "w= $DVD_NR:$TITLE_NR " '$0==w{found=1;exit;}END{if (found==1){exit 0}else{exit 1}}' \
+      && { use=1; vrb "  > CONSIDERING DVD#$DVD_NR:title#$TITLE_NR (through parameter --exclude)"; }
+  fi
+
+  [ $DVD_ALL_TITLES ] && use=1;
+
+  # titles can be ONLY selected by DURATION /or/ can be EXCLUDED because of DURATION
+  if [ -z "$use" -o -n "$DVD_ALL_TITLES" ]; then
+    if [ -n "$DVD_TITLE_MINDUR" ]; then
+      if [ -n "$DVD_TITLE_MAXDUR" ]; then [ "$duration" \> "$DVD_TITLE_MINDUR" ] && [ "$duration" \< "$DVD_TITLE_MAXDUR" ] && use=1 || use="";
+      else [ "$duration" \> "$DVD_TITLE_MINDUR" ] && use=1 || use=""; fi;
+    else
+      if [ -n "$DVD_TITLE_MAXDUR" ]; then [ "$duration" \< "$DVD_TITLE_MAXDUR" ] && use=1 || use=""; fi;
+    fi
+  fi
+
+  if [ -n "$use" -a -n "$DVD_TITLES_EXCLUDE" ]; then
+    echo " $DVD_TITLES_EXCLUDE "|env LC_ALL=C gawk -b -v "w= $DVD_NR:$TITLE_NR " '$0==w{found=1;exit;}END{if (found==1){exit 0}else{exit 1}}' \
+      && { use=; vrb "  > EXCLUDED DVD#$DVD_NR:title#$TITLE_NR (through parameter --exclude)"; }
+  fi;
+
+  dbg "DBG DVD_decideIfTitleIsSelected(): --> use='$use'"
+  [ "$use" = 1 ] && return 0 || return 1;
+}
+
+
+#########################################################################################################
+#########################################################################################################
+#########################################################################################################
+###  M A I N  ::
+#########################################################################################################
+
+# parse commandline parameters:
+[ $# -eq 0 ] && usage
+
+DRY_RUN=;
+
+### GLOBAL VARIABLE(s):
+CLEANUP_DONE=; # so that we know if we were in _trap already - to avoide multiple cleanups!
+TEMPFILES=; # newline separated list of tempfiles
+#
+_cleanup_() { local rc=$?;
+    [ $CLEANUP_DONE ] && return || dbg ">>> CLEANUP! ($rc) [$@] - TEMPFILES='$TEMPFILES'"
+    if [ -z "$DO_CLEANUP" ]; then
+      [ -n "$TEMPFILES" ] && { echo; echo "ATTENTION: KEEPING THE TEMPFILE(s):"; echo "$TEMPFILES"|while read a; do echo "      '$a'"; done; }
+    else
+      [ -n "$TEMPFILES" ] && { vrb; vrb ">>> CLEANUP: Removing (!)"; echo "$TEMPFILES"|while read a; do rm -f "$a"; vrb "      '$a'"; done; vrb; TEMPFILES=; }
+    fi
+    CLEANUP_DONE=1
+    exit $rc; # return does not suffice
+}
+#
+###########################################################################
+# set up the trap for a clean exit:
+  for i in 0 1 2 3 4 5 6 7 8 9; do trap "_cleanup_ \"TRAP\" $i;" $i; done;
+
+
+###########################################################################
+# pre-parsing -- GLOBAL-PARAMETERS LOOP - check only for IMPORTANT global params before actually parsing parameters
+  for arg in "$@"; do
+    case "$arg" in
+      --help)       usage;;
+      -D|--debug)   DBG=1; VRB=1;;
+      -V|--verbose) VRB=1;;
+      -d|--dry)     DRY_RUN=1;;
+      -L|--leave)   DO_CLEANUP=;;
+    esac
+  done
+
+###########################################################################
+# main parsing -- GLOBAL-PARAMETERS LOOP, parse until MODE is set
+  while [ $# -gt 0 ]; do
+    dbg "DBG: MAIN-LOOP arg='$1'"
+    case "$1" in
+      -D|--debug)   shift;; # ignore as already treated in above for loop
+      -V|--verbose) shift;; # ignore as already treated in above for loop
+      -d|--dry)     shift;; # ignore as already treated in above for loop
+      -L|--leave)   shift;; # ignore as already treated in above for loop
+
+      -E|--eject)   DO_EJECT=1;   shift;;
+                    #[ -z "$1" ] && err "--eject needs DVD_DIR, like the 'dvd' mode";
+                    #DVD_DIR="$1"; shift; ;;
+
+      [dD][vV][dD]) MODE="DVD"; shift; ;;
+      [fF][iI][lL][eE]) MODE="FILE"; shift; ;;
+      *) err 009 "Invalid parameter '$1'. MODE or one of GLOBAL-PARAMETERS expected. Check --help." ;;
+    esac
+    [ -n "$MODE" ] && break;
+  done
+
+  # ONLY EJECT, without MODE ?
+  [ -z "$MODE" ] && [ $DO_EJECT ] && MODE="EJECT"
+
+  dbg "DBG: VRB='$VRB' DBG='$DBG' DRY_RUN='$DRY_RUN' DO_CLEANUP='$DO_CLEANUP' MODE='$MODE' DO_EJECT='$DO_EJECT'"
+
+###########################################################################
+# set MODE && MODE_PARAM(s):
+  case "$MODE" in
+
+    EJECT) do_eject exit "as asked";;
+
+    FILE)
+        # collect VIDEOFILES:
+        TOTAL_INPUT_CNT=0;
+        VIDEOFILES=""; FILE_OUTPUT_FN_TAG=""; FILE_OUTPUT_FN=""; FILE_SUB=""; FILE_AUDIO="";
+        while [ 1 ]; do
+          case "$1" in --|encode) break;; # either with -- or with 'encode' CMD: stop parsing for VIDEOFILES / parameters
+                       --tag)       shift; FILE_OUTPUT_FN_TAG="$1";   [ -z "$1" ] && err 058 "Missing parameter for --tag."; shift; ;;
+                       --ctp[1-9]|--ctp[1-9][0-9]|--ctp[1-9][0-9][0-9])
+                                                                   nr="$(echo "$1"|sed -n 's/^--ctp\([1-9][0-9]*\)$/\1/p')";
+                                                                   [ -z "$nr" ] && err 059 "Invalid parameter '$1'. Please check.";
+                                                                   shift;
+                                                                   [ -z "$1" ] && err 060 "--ctp<title_nr> needs parameter. Please check.";
+                                                                   tmp="CTP$nr";
+                                                                   eval "a=\"$tmp\""; #echo "nr=$nr: a='$a' tmp='$tmp'";
+                                                                   [ -n "$a" ] && err 068 "You provided --ctp$nr multiple times. Please check.";
+                                                                   dbg "DBG: Setting CTP$nr=\"$1\""
+                                                                   eval "CTP$nr=\"$1\""; shift; ;;
+                       --sub)     shift; FILE_SUB="$1";            [ -z "$1" ] && err 079 "Missing parameter for --sub."; shift; ;;
+                       --audio)   shift; FILE_AUDIO="$1";          [ -z "$1" ] && err 080 "Missing parameter for --audio."; shift; ;;
+                       --output-fn) shift; FILE_OUTPUT_FN="$1";    [ -z "$1" ] && err 038 "Missing parameter for --output-fn."; shift; ;;
+                       --*) err 039 "Invalid parameter '$1' for MODE 'FILE'. Please check.";;
+                       *) [ -z "$1" ] && [ $# -eq 0 ] && [ $TOTAL_INPUT_CNT -gt 0 ] && err 031 "Please terminate filelist with '--'.";
+                          [ -z "$1" -a -z "$VIDEOFILES" ] && err 030 "Please specify FILE(s) for MODE '$MODE'.";
+                          [ -e "$1" ] || err 028 "Provided file '$1' not found. Please check.";
+                          [ -z "$VIDEOFILES" ] && VIDEOFILES="$1" || VIDEOFILES="$VIDEOFILES$NL$1";
+                          TOTAL_INPUT_CNT=$(( $TOTAL_INPUT_CNT + 1 ));
+                          dbg "DBG: Found $TOTAL_INPUT_CNT. FILE '$1'"
+                          shift;;
+          esac
+       done
+       dbg "DBG: VIDEOFILES='$VIDEOFILES'"
+       dbg "DBG: TOTAL_INPUT_CNT='$TOTAL_INPUT_CNT'"
+       [ $TOTAL_INPUT_CNT -eq 0 ] && err 029 "No FILE(s) provided for MODE '$MODE'. Please check."
+       ;;
+
+    DVD)
+        # remove all DVD_ parameters!
+        for a in $(set|sed -n 's/^\(DVD_[^=]*\)=.*$/\1/p'|xargs echo); do dbg "DBG: Found DVD_* variable '$a' -> UNSETTING IT!"; unset "$a"; done
+        #MANDATORY-PARAMS#
+          DVD_DIR="$1"; shift; dbg "DBG: Set DVD_DIR='$DVD_DIR'"
+        #OPTIONAL-PARAMS#
+          DVD_NUMS=;
+          DVD_SEASON=; DVD_EPISODE=; DVD_OUTPUT_FN=;  DVD_OUTPUT_FN_TAG=;
+          DVD_SUB=; DVD_AUDIO=;
+          DVD_ALL_TITLES=; DVD_MAIN_TITLE=; DVD_TITLE_MINDUR=; DVD_TITLE_MAXDUR=; DVD_TITLES=; DVD_TITLES_INCLUDE=; DVD_TITLES_EXCLUDE=;
+        while [ 1 ]; do
+           case "$1" in 
+                        -D|--debug)   shift;; # ignore as already treated in above for loop
+                        -V|--verbose) shift;; # ignore as already treated in above for loop
+                        -d|--dry)     shift;; # ignore as already treated in above for loop
+                        -L|--leave)   shift;; # ignore as already treated in above for loop
+
+                        -E|--eject) DO_EJECT=1; shift;;
+                        --dvds)    shift; DVD_NUMS="$DVD_NUMS $(seq -s ' ' "$1" "$2")" || [ -z "$1" ] || [ -z "$2" ] || err 040 "Invalid parameter(s) for --dvds: FIRST='$1' and/or LAST='$2' -- Unable to create sequence (by calling seq -s ' ' <FIRST> <LAST>)."; shift; shift; dbg "DBG: Building DVD_NUMS='$DVD_NUMS'..."; ;;
+
+                        --episode) shift; DVD_SEASON="$(strip_opt_leading_zero "$1")"; shift;
+                                          DVD_EPISODE="$(strip_opt_leading_zero "$1")"; shift;
+                          [ -z "$DVD_SEASON" ] && err 048 "Missing SEASON number. Should be the 1st parameter of '--episode'."
+                          [ -z "$DVD_EPISODE" ] && err 049 "Missing EPISODE number. Should be the 2nd parameter of '--episode'."
+                          DVD_EPISODE=$(( $DVD_EPISODE + 0 )) 2>/dev/null || err 047 "EPISODE number seems not to be a simple number ?! - maybe a leading 0 ?"
+                          ;;
+                        --tag)       shift; DVD_OUTPUT_FN_TAG="$1";   [ -z "$1" ] && err 052 "Missing parameter for --tag."; shift; ;;
+                        --ctp[1-9]|--ctp[1-9][0-9]|--ctp[1-9][0-9][0-9])
+                                                                   nr="$(echo "$1"|sed -n 's/^--ctp\([1-9][0-9]*\)$/\1/p')";
+                                                                   [ -z "$nr" ] && err 053 "Invalid parameter '$1'. Please check.";
+                                                                   shift;
+                                                                   [ -z "$1" ] && err 054 "--ctp<title_nr> needs parameter. Please check.";
+                                                                   tmp="\$CTP$nr";
+                                                                   eval "a=\"$tmp\""; #echo "nr=$nr: a='$a' tmp='$tmp'";
+                                                                   [ -n "$a" ] && err 067 "You provided --ctp$nr multiple times. Please check.";
+                                                                   dbg "DBG: Setting CTP$nr=\"$1\""
+                                                                   eval "CTP$nr=\"$1\""; shift; ;;
+                        --output-fn) shift; DVD_OUTPUT_FN="$1";    [ -z "$1" ] && err 046 "Missing parameter for --output-fn."; shift; ;;
+
+                        --sub)     shift; DVD_SUB="$1";            [ -z "$1" ] && err 043 "Missing parameter for --sub."; shift; ;;
+                        --audio)   shift; DVD_AUDIO="$1";          [ -z "$1" ] && err 044 "Missing parameter for --audio."; shift; ;;
+
+                        --no-gap-analysis)  shift; DO_GAP_ANALYSIS=0;;
+                        --all)     shift; DVD_ALL_TITLES=1; ;;
+                        --main)    shift; DVD_MAIN_TITLE=1; ;;
+                        --mindur)  shift; DVD_TITLE_MINDUR="$1";   [ -z "$1" ] && err 041 "Missing parameter for --mindur."; shift; ;;
+                        --maxdur)  shift; DVD_TITLE_MAXDUR="$1";   [ -z "$1" ] && err 042 "Missing parameter for --maxdur."; shift; ;;
+                        --titles)  shift; DVD_TITLES="$1";         [ -z "$1" ] && err 045 "Missing parameter for --titles."; shift; ;;
+                        --include) shift; DVD_TITLES_INCLUDE="$1"; [ -z "$1" ] && err 050 "Missing parameter for --include."; shift; ;;
+                        --exclude) shift; DVD_TITLES_EXCLUDE="$1"; [ -z "$1" ] && err 051 "Missing parameter for --exclude."; shift; ;;
+                        *) break; ;;
+           esac
+        done
+
+        # check existance of (all) DVD_DIR(s):
+        if [ -z "$DVD_NUMS" ]; then
+          [ -d "$DVD_DIR/VIDEO_TS" ] || err 004 "DVD_DIR '$DVD_DIR' (parameter for MODE) must be valid DVD directory (and contain at least a VIDEO_TS dir) -- maybe missing --dvds parameter ?"; 
+        else
+          for DVD_NR in $DVD_NUMS; do DVD_NR_2=$(format_as_2_digits "$DVD_NR");
+                                      eval "tmp=\"$DVD_DIR\"";
+                                      [ -d "$tmp" ] || err 008 "MISSING DVD_DIR '$tmp' (from DVD_NUMS '$DVD_NR')";
+                                      [ -d "$tmp/VIDEO_TS" ] || err 027 "INVALID DVD_DIR '$tmp' (from DVD_NUMS '$DVD_NR') must be valid DVD directory (and contain at least a VIDEO_TS dir).";
+                                   done
+        fi
+        ;;
+
+    *) err 002 "Invalid mode '$MODE'." ;;
+  esac;
+
+  dbg "DBG: DO_GAP_ANALYSIS='$DO_GAP_ANALYSIS'"
+
+  # allow ,-separated/comma-separated /OR/ space-separated list -- and interprete ranges: replace 1-3 with "1 2 3":
+  dbg "DBG: DVD_TITLES='$DVD_TITLES' RAW from --titles"
+  DVD_TITLES="$(echo "$DVD_TITLES"|env LC_ALL=C gawk -b '{gsub(","," "); n=split($0,m,/ /); for(i=1; i<=n; i++) { if (m[i] ~ /^[1-9][0-9]*-[1-9][0-9]*$/) { nr=split(m[i],a,/-/); if (nr==2 && a[2]>a[1]) { for(j=a[1]; j<=a[2]; j++) {printf(" %s", j);}; }; } else {printf(" %s", m[i]);}; }; }')"
+  dbg "DBG: DVD_TITLES='$DVD_TITLES' AFTER parsing with awk"
+  DVD_TITLES_INCLUDE="$(echo "$DVD_TITLES_INCLUDE"|env LC_ALL=C gawk -b '{gsub(","," "); print $0}')"
+  DVD_TITLES_EXCLUDE="$(echo "$DVD_TITLES_EXCLUDE"|env LC_ALL=C gawk -b '{gsub(","," "); print $0}')"
+
+  case "$1" in
+    --) dbg "Comand-Line-Parameter '--' means, next will need to be the CMD!"; shift; ;; # ignore --, but now expect CMD !
+    --*) err 006 "Invalid OPTIONAL-PARAMS '$1' for MODE '$MODE'."; ;;
+  esac
+
+  # at this point by default we expect a CMD:
+  if [ -n "$1" ]; then
+    CMD="$1"; shift;
+    dbg "Set CMD to '$CMD'."
+  else
+    # do we need another parameter ? ... it depends ;)
+    # determine DEFAULT CMD for different MODEs
+    case "$MODE" in
+      "EJECT") do_eject "" "as asked"; vrb; vrb "Done - successfully."; vrb; exit 0;; # only do an eject ?
+      "DVD")   # without command for DVD: if we have --eject --> only do this!
+               if [ $DO_EJECT ]; then
+                 do_eject exit "as asked"
+               else # by default without paraemter do a scan for MODE 'dvd'
+                 CMD=scan;
+                 dbg "Set CMD to default value '$CMD' for MODE '$MODE'."
+               fi;;
+      *)      err 007 "Missing COMMAND for MODE '$MODE'.";; # -- MAYBE MISSING PARAMETER TO [OPTIONAL-PARAMS] of <MODE>!"
+    esac
+  fi
+
+###########################################################################
+# set EVAL_STR, CMD && CMD_PARAMS (<CMD>_SOMETHING=..)
+
+  EVAL_STR=;
+  case "$MODE" in
+    DVD|FILE)
+      case "$CMD" in  ### HERE:NEW-DVD-COMMANDS !!!
+         eject|-E|--eject)        DO_EJECT=1; do_eject exit "as asked";;
+         encode|scan|titles)      EVAL_STR="get_${CMD}"; ;;
+         custom)                  EVAL_STR="${MODE}_${CMD}"; ;;
+         *) err 003 "Invalid COMMAND '$CMD' for MODE '$MODE'."; ;;
+      esac
+
+      # Check for OPTIONAL PARAMS of <CMD>:
+      case "$CMD" in
+        encode)
+          # remove all ENCODE_ parameters!
+          for a in $(set|sed -n 's/^\(ENCODE_[^=]*\)=.*$/\1/p'|xargs echo); do dbg "DBG: Found ENCODE_* variable '$a' -> UNSETTING IT!"; unset "$a"; done
+          ENCODE_CMDSTR_NAME=; ENCODE_FORCE_OVERWRITE_EXISTING=; ENCODE_ONLY=;
+          while [ 1 ]; do
+            dbg "DBG: <CMD> encode :: Looking for parameters! - Currently looking at 1='$1'"
+            case "$1" in -f|--force-overwrite) shift; ENCODE_FORCE_OVERWRITE_EXISTING=1; ;;
+                         -o|--only) shift; ENCODE_ONLY="$1"; shift; [ -z "$ENCODE_ONLY" ] && err 012 "Missing value for parameter --only." ;;
+                         -q|--quality) shift; ENCODE_QUALITY="$1"; shift; [ -z "$ENCODE_QUALITY" ] && err 018 "Missing value for parameter --quality." ;;
+                         -E|--eject) DO_EJECT=1; shift;;
+                         --output-fn) shift; [ -n "$FILE_OUTPUT_FN" ] && err 076; FILE_OUTPUT_FN="$1";    [ -z "$1" ] && err 077 "Missing parameter for --output-fn."; shift; ;;
+                         "") break; ;;
+                          *) if [ -z "$ENCODE_CMDSTR_NAME" ]; then ENCODE_CMDSTR_NAME="$1"; shift;
+                             else [ -z "$1" ] && break; err 013 "Invalid parameter '$1' for CMD '$CMD' (in MODE '$MODE' ENCODE_CMDSTR_NAME='$ENCODE_CMDSTR_NAME')."; fi; ;;
+             esac
+          done ;;
+
+          *)
+            [ -n "$1" ] && err 015 "Invalid parameter '$1' to <CMD> '$CMD'. Maybe the parameter needs to be placed BEFORE the CMD ?"; ;;
+      esac;
+  esac
+
+[ -z "$CMD" ] && err 005 "Missing COMMAND for MODE '$MODE'";
+
+####################################################################
+# DEFAULT VALUES:
+
+ENCODE_LIST=; ENCODE_LIST_CNT=0; # make sure that these variables are GLOBAL
+
+[ -z "$ENCODE_QUALITY" ] && { ENCODE_QUALITY="$MY_DEFAULT_QUALITY"; dbg "DBG: Setting ENCODE_QUALITY using \$MY_DEFAULT_QUALITY '$MY_DEFAULT_QUALITY' from CONF_FILE."; }
+[ -z "$ENCODE_CMDSTR_NAME" ] && { ENCODE_CMDSTR_NAME="$MY_DEFAULT_PRESET"; dbg "DBG: Setting ENCODE_CMDSTR_NAME using \$MY_DEFAULT_PRESET '$MY_DEFAULT_PRESET' from CONF_FILE."; }
+[ -z "$ENCODE_CMDSTR_NAME" ] && err 014 "Missing ENCODE_CMDSTR_NAME. Check if you have a variable MY_DEFAULT_PRESET in CONF_FILE '$CONF_FILE'.";
+
+case "$MODE" in
+  DVD)
+    get_output_suffix "$ENCODE_CMDSTR_NAME"; dbg "DBG: Set OUTPUT_SUFFIX='$OUTPUT_SUFFIX'"
+    if [ -z "$DVD_OUTPUT_FN" ]; then
+      DVD_OUTPUT_FN="$( echo "/${DVD_DIR}/"|sed -n 's|.*/\([^/]*\)/\+$|\1|p' )_\${DVD_EPISODE_STR}${DVD_OUTPUT_FN_TAG}.$OUTPUT_SUFFIX";
+      dbg "DBG: Setting DVD_OUTPUT_FN using DVD_DIR '$DVD_DIR': '$DVD_OUTPUT_FN'";
+    else
+      # if DVD_OUTPUT_FN does NOT end yet with OUTPUT_SUFFIX: add it:
+      DVD_OUTPUT_FN="$( echo "$DVD_OUTPUT_FN"|env LC_ALL=C gawk -v SFX="$OUTPUT_SUFFIX" -b '{if (match($0,"[.]"SFX"$")){print $0}else{print $0"."SFX}}' )"
+      dbg "DBG: Setting DVD_OUTPUT_FN using OUTPUT_SUFFIX '$OUTPUT_SUFFIX': '$DVD_OUTPUT_FN'";
+    fi
+    [ -z "$DVD_OUTPUT_FN" ] && err 016 "Missing DVD_OUTPUT_FN. Not sure why... Check: echo \"/${DVD_DIR}/\"|sed -n 's|.*/\\([^/]*\\)/\\+$|\\1|p'";
+
+    [ -d "$OUTPUT_DIR___DVD" ] || err 017 "OUTPUT_DIR___DVD '$OUTPUT_DIR___DVD' (see CONF_FILE '$CONF_FILE') NOT FOUND!"
+    DVD_OUTPUT_FN="$OUTPUT_DIR___DVD/$DVD_OUTPUT_FN"
+
+    # by default (with no other titles filtering parameter set) list ALL titles:
+    [ -z "$DVD_MAIN_TITLE$DVD_TITLE_MINDUR$DVD_TITLE_MAXDUR$DVD_TITLES$DVD_TITLES_INCLUDE$DVD_TITLES_EXCLUDE" ] && DVD_ALL_TITLES=1 && vrb "Defaulting to '--all' to list ALL available titles.";
+
+    # count all DVD_NUMS:
+    [ -z "$DVD_NUMS" ] && TOTAL_INPUT_CNT=1 || {
+      TOTAL_INPUT_CNT=0; for i in $DVD_NUMS; do TOTAL_INPUT_CNT=$(( $TOTAL_INPUT_CNT + 1 )); done
+    };;
+
+  FILE)
+    get_output_suffix "$ENCODE_CMDSTR_NAME"; dbg "DBG: Set OUTPUT_SUFFIX='$OUTPUT_SUFFIX'"
+    [ -z "$OUTPUT_DIR___FILE" -o -d "$OUTPUT_DIR___FILE" ] || err 035 "OUTPUT_DIR___FILE '$OUTPUT_DIR___FILE' (see CONF_FILE '$CONF_FILE') NOT FOUND!"
+    if [ -z "$FILE_OUTPUT_FN" ]; then
+      if [ -z "$OUTPUT_DIR___FILE" ]; then
+        OUTPUT_PATH___FILE="\$INPUT_PATH_BASE\$FILE_OUTPUT_FN_TAG.\$OUTPUT_SUFFIX"
+        dbg "DBG: Setting OUTPUT_PATH___FILE using PATH from MOVIEFILE '$INPUT_PATH_BASE': '$OUTPUT_PATH___FILE'";
+      else
+        OUTPUT_PATH___FILE="$OUTPUT_DIR___FILE/\$INPUT_FN_BASE\$FILE_OUTPUT_FN_TAG.\$OUTPUT_SUFFIX"
+        dbg "DBG: Setting OUTPUT_PATH___FILE using PATH from CONF_FILE '$OUTPUT_DIR___FILE': '$OUTPUT_PATH___FILE'";
+      fi
+    else
+      if [ -z "$OUTPUT_DIR___FILE" ]; then
+        OUTPUT_PATH___FILE="$FILE_OUTPUT_FN"
+        dbg "DBG: Setting OUTPUT_PATH___FILE using only FILE_OUTPUT_FN: '$OUTPUT_PATH___FILE'";
+      else
+        OUTPUT_PATH___FILE="$OUTPUT_DIR___FILE/${FILE_OUTPUT_FN##*/}" # ensure that we don't have any PATH in $FILE_OUTPUT_FN
+        dbg "DBG: Setting OUTPUT_PATH___FILE using FILE_OUTPUT_FN (omitting any PATH in there) and using OUTPUT_DIR___FILE from CONF_FILE '$OUTPUT_DIR___FILE': '$OUTPUT_PATH___FILE'";
+      fi
+    fi
+    [ -z "$OUTPUT_PATH___FILE" ] && err 037 "Missing OUTPUT_PATH___FILE. Not sure why...";
+    ;;
+
+esac
+
+####################################################################
+# OUTPUT VARIABLES:
+[ -z "$DO_CLEANUP" ] && tmp=" and will *NOT* CLEANUP" || tmp=" and will CLEANUP"
+vrb ">>> MODE='$MODE' CMD='$CMD' --> EVAL_STR='$EVAL_STR'$tmp"
+[ $VRB ] && case "$MODE" in
+   FILE) vrb ">>> Found $TOTAL_INPUT_CNT FILEs." vrb ">>> #OPTIONAL-PARAMS#:";
+         set|env LC_ALL=C gawk -b '/^FILE_/{sub(/^/,"    "); print $0}';;
+   DVD)  vrb ">>> Found $TOTAL_INPUT_CNT DVDs."; vrb ">>> #OPTIONAL-PARAMS#:";
+         set|env LC_ALL=C gawk -b '/^DVD_/{sub(/^/,"    "); print $0}';;
+esac
+[ $VRB ] && case "$CMD" in
+   ENCODE) vrb ">>> CMD_PARAMS of <CMD> '$CMD': (only ENCODE_CMDSTR_NAME is /mandatory)";
+           set|env LC_ALL=C gawk -b '/^ENCODE_/{sub(/^/,"    "); print $0}';;
+esac
+
+####################################################################
+# DO IT:
+
+case "$MODE" in
+  FILE) # HERE we KNOW that TOTAL_INPUT_CNT > 0 !
+    FILE_NR=0;
+    while [ $FILE_NR -lt $TOTAL_INPUT_CNT ]; do
+      FILE_NR=$(( $FILE_NR + 1 )); INPUT_IDX="$FILE_NR"
+
+      INPUT_PATH="$(echo "$VIDEOFILES"|sed -n "${FILE_NR}p")" || err 036 # we use this INSTEAD of <<_eof_ as this stdin based appproach breaks when HandBrakeCli is called!
+      [ -z "$INPUT_PATH" ] && err 033 "FILE_NR='$FILE_NR', TOTAL_INPUT_CNT='$TOTAL_INPUT_CNT'"
+
+      # prepare '$CTP' with TITLE SPECIFIC string for this title_nr ! (see --ctp<title_nr>)
+      eval "CTP=\"\$CTP$FILE_NR\"" && dbg "~~~ [FILE LOOP] Using \$CTP '$CTP' (from CTP$FILE_NR).";
+
+      # determine OUTPUT_PATH
+      INPUT_FN="${INPUT_PATH##*/}";         # only FILENAME of INPUT_PATH
+      INPUT_FN_DIR="${INPUT_PATH%/*}";      # only PATH of INPUT_PATH
+      INPUT_FN_BASE="${INPUT_FN%.*}";       # INPUT_FN without LAST suffix
+      INPUT_PATH_BASE="${INPUT_PATH%.*}";   # INPUT_PATH without LAST suffix
+      # At this point we directly set OUTPUT_PATH (needed by get_titles, called by get_encode):
+      dbg "~~~ [FILE LOOP] eval \"OUTPUT_PATH='$OUTPUT_PATH___FILE'\""
+      eval "OUTPUT_PATH=\"$OUTPUT_PATH___FILE\"";
+
+      # ensure that OUTPUT_PATH ends with $OUTPUT_SUFFIX:
+      OUTPUT_PATH="$(echo "$OUTPUT_PATH"|env LC_ALL=C gawk -v SFX="$OUTPUT_SUFFIX" -b '{if (match($0,"[.]"SFX"$")){print $0}else{print $0"."SFX}}')"
+
+      dbg "~~~ [FILE LOOP] INPUT_PATH='$INPUT_PATH'"
+      dbg "~~~ [FILE LOOP] -> INPUT_FN='$INPUT_FN', INPUT_FN_BASE='$INPUT_FN_BASE'"
+      dbg "~~~ [FILE LOOP] -> OUTPUT_PATH='$OUTPUT_PATH'"
+
+      if [ $DBG ]; then dbg; dbg "~~~ [FILE LOOP]: FILE $FILE_NR (FILE_NR) / $TOTAL_INPUT_CNT (TOTAL_INPUT_CNT)";
+                   else vrb; vrb ">>> FILE $FILE_NR/$TOTAL_INPUT_CNT"; fi;
+      eval "$EVAL_STR"
+      rc=$?;
+      rcs="$rcs $rc";
+      dbg "~~~ [FILE LOOP] RETURN CODE = $rc."
+    done
+    # count errors:
+    i=0; for rc in $rcs; do [ $rc -ne 0 ] && i=$(( $i + 1 )); done
+    if [ $i -eq 0 ]; then vrb; vrb "Done - successfully."; vrb; exit 0;
+                     else echo; echo "$i / $TOTAL_INPUT_CNT FILES had ERRORS !"; echo; exit 1; fi;
+    ;;
+  DVD)
+    if [ -z "$DVD_NUMS" ]; then 
+      INPUT_IDX=1; DVD_NR=_;
+      INPUT_PATH="$DVD_DIR"; dbg "~~~ [SINGLE DVD] INPUT_PATH='$INPUT_PATH'"
+      eval "$EVAL_STR"; rc=$?;
+      if [ $rc -eq 0 ]; then 
+        echo "${NL}  > [SINGLE DVD] SUCCESSFUL :)  (RETURN CODE = $rc)"
+        do_eject exit "(if successful) as asked";
+     else
+        echo "${NL}  > [SINGLE DVD] FAILED !!! - RETURN CODE = $rc."; echo; exit $rc;
+     fi
+    else
+      INPUT_IDX=0; rcs=;
+      DVD_DIR_ORIG="$DVD_DIR"
+      for DVD_NR in $DVD_NUMS; do
+        INPUT_IDX=$(( $INPUT_IDX + 1 ))
+        DVD_NR_2=$(format_as_2_digits "$DVD_NR");
+        eval "DVD_DIR=\"$DVD_DIR_ORIG\""; INPUT_PATH="$DVD_DIR";
+        if [ $DBG ]; then dbg; dbg "~~~ [DVD LOOP] DVD $INPUT_IDX/$TOTAL_INPUT_CNT (#$DVD_NR_2): DVD_NR='$DVD_NR' / DVD_NR_2='$DVD_NR_2' -> DVD_DIR='$DVD_DIR'";
+                     else vrb; vrb ">>> DVD $INPUT_IDX/$TOTAL_INPUT_CNT (#$DVD_NR_2): DVD_DIR='$DVD_DIR'"; fi
+
+        eval "$EVAL_STR"; rc="$?"; rcs="$rcs $rc";
+        if [ $rc -eq 0 ]; then
+          echo "${NL}  > [DVD LOOP] DVD $INPUT_IDX/$TOTAL_INPUT_CNT (#$DVD_NR_2): SUCCESSFUL :)  (RETURN CODE = $rc. [rcs='$rcs'])"
+          do_eject "" "(if successful) as asked";
+        else
+          echo "${NL}  > [DVD LOOP] DVD $INPUT_IDX/$TOTAL_INPUT_CNT (#$DVD_NR_2): FAILED !!! - RETURN CODE = $rc. [rcs='$rcs']"
+        fi
+      done
+      # count errors:
+      i=0; for rc in $rcs; do [ $rc -ne 0 ] && i=$(( $i + 1 )); done
+      if [ $i -eq 0 ]; then echo; echo "All done - successfully."; exit 0;
+                       else echo; echo "$i / $TOTAL_INPUT_CNT DVDS had ERRORS !"; exit 1; fi;
+    fi;;
+esac
+
