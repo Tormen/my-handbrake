@@ -5,7 +5,9 @@
 . "/LINKS/default/my-cmdstrs" || { echo "FAILED [$?] TO ACCESS CMDSTRFILE. EXITING."; exit 1; }
 
 CONF_FILE_GLOBAL="/LINKS/default/my-handbrake.GLOBAL"
-CONF_FILE_LOCAL="/LINKS/default/my-handbrake"
+## both spellings are accepted under /LINKS/default: .conf first, then bare
+CONF_FILE_LOCAL="/LINKS/default/my-handbrake.conf"
+[ -e "$CONF_FILE_LOCAL" ] || CONF_FILE_LOCAL="/LINKS/default/my-handbrake"
 [ -s "$CONF_FILE_GLOBAL" ] && . "$CONF_FILE_GLOBAL"
 [ -s "$CONF_FILE_LOCAL" ] && . "$CONF_FILE_LOCAL"
 
