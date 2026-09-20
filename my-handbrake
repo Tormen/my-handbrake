@@ -777,7 +777,7 @@ SCRIPT_NAME="my-handbrake"
 # SCRIPT_RELEASE what 'git describe --tags --long' said then; both are written
 # by 'stamp-version', so a deployed copy with no git can say what it is.
 VERSION=""
-SCRIPT_COMMIT="17ebd65"
+SCRIPT_COMMIT="3a9c961"
 SCRIPT_RELEASE=""
 
 # The first 12 hex of this file's own SHA-256: the value that identifies the
@@ -813,6 +813,14 @@ _version_string() {
   _vs_b=$(_build_id)
   _vs_v=${VERSION:+ $VERSION}
   _vs_d=$(git -c safe.directory='*' -C "$(_self_dir)" describe --tags --long 2>/dev/null)
+  # describe answers about WHERE this file sits, not about what it is: a copy
+  # dropped in a foreign repo gets THAT repo's tags (/LINKS/global is one, and
+  # it holds the copies update-LINKS promotes). The stamped commit is the
+  # proof -- a repo that does not have it is not this tool's repo.
+  if [ -n "$_vs_d" ] && [ -n "$SCRIPT_COMMIT" ] \
+     && ! git -c safe.directory='*' -C "$(_self_dir)" cat-file -e "${SCRIPT_COMMIT}^{commit}" 2>/dev/null; then
+    _vs_d=""
+  fi
   [ -n "$_vs_d" ] || _vs_d=$SCRIPT_RELEASE
   case "$_vs_d" in
     *-*-g*)
