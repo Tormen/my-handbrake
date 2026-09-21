@@ -777,7 +777,7 @@ SCRIPT_NAME="my-handbrake"
 # SCRIPT_RELEASE what 'git describe --tags --long' said then; both are written
 # by 'stamp-version', so a deployed copy with no git can say what it is.
 VERSION=""
-SCRIPT_COMMIT="4f272f0"
+SCRIPT_COMMIT="005d280"
 SCRIPT_RELEASE=""
 
 # The first 12 hex of this file's own SHA-256: the value that identifies the
@@ -848,36 +848,37 @@ _version_string() {
 # they belong to. Run it after committing and BEFORE pushing (the amend
 # rewrites the commit); a tag comes after it, never before.
 _stamp_version() {
-  _sv_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || { echo "stamp-version: cannot resolve my own directory" >&2; exit 1; }
+  _sv_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || err 082 "stamp-version: cannot resolve my own directory"
   _sv_self="$_sv_dir/$(basename "$0")"
   git -C "$_sv_dir" rev-parse --git-dir >/dev/null 2>&1 \
-    || { echo "stamp-version: not a git checkout -- nothing to stamp" >&2; exit 1; }
+    || err 083 "stamp-version: not a git checkout -- nothing to stamp"
   _sv_sha=$(git -C "$_sv_dir" rev-parse --short HEAD 2>/dev/null)
-  [ -n "$_sv_sha" ] || { echo "stamp-version: no commit to stamp from" >&2; exit 1; }
+  [ -n "$_sv_sha" ] || err 084 "stamp-version: no commit to stamp from"
   if git -C "$_sv_dir" rev-parse -q --verify '@{upstream}' >/dev/null 2>&1 \
      && git -C "$_sv_dir" merge-base --is-ancestor HEAD '@{upstream}' 2>/dev/null; then
-    echo "stamp-version: HEAD $_sv_sha is already pushed -- amending it would rewrite published history. Commit, stamp, THEN push." >&2
-    exit 1
+    err 89 "stamp-version: HEAD $_sv_sha is already pushed -- amending it would rewrite published history. Commit, stamp, THEN push."
   fi
+  # The repo may be SHARED -- other sessions commit here too -- and an amend
+  # rewrites whatever HEAD happens to be. Stamp only the commit that carries
+  # THIS file: if HEAD does not touch it, HEAD is somebody else's work.
+  [ -n "$(git -C "$_sv_dir" show --name-only --format= HEAD -- "$(basename "$0")" 2>/dev/null)" ] \
+     || err 095 "stamp-version: HEAD does not touch this file -- it is not this file's commit (commit it first; in a shared repo the amend would rewrite someone else's)."
   _sv_staged=$(git -C "$_sv_dir" diff --cached --name-only 2>/dev/null)
-  if [ -n "$_sv_staged" ]; then
-    echo "stamp-version: something is staged -- the amend would fold it in:" >&2
-    printf '%s\n' "$_sv_staged" | sed 's/^/    > /' >&2
-    exit 1
-  fi
+  [ -z "$_sv_staged" ] \
+    || err 093 "stamp-version: something is staged -- the amend would fold it into this commit: $_sv_staged"
   git -C "$_sv_dir" diff --quiet -- "$(basename "$0")" 2>/dev/null \
-    || { echo "stamp-version: this script has uncommitted edits -- commit them first" >&2; exit 1; }
+    || err 085 "stamp-version: this script has uncommitted edits -- commit them first"
   _sv_desc=$(git -c safe.directory='*' -C "$_sv_dir" describe --tags --long 2>/dev/null)
-  _sv_tmp=$(mktemp "${TMPDIR:-/tmp}/my-handbrake.stamp.XXXXXX") || { echo "stamp-version: mktemp failed" >&2; exit 1; }
+  _sv_tmp=$(mktemp "${TMPDIR:-/tmp}/my-handbrake.stamp.XXXXXX") || err 086 "stamp-version: mktemp failed"
   cp -p "$_sv_self" "$_sv_tmp" 2>/dev/null
   sed -e "s|^SCRIPT_COMMIT=.*|SCRIPT_COMMIT=\"$_sv_sha\"|" \
       -e "s|^SCRIPT_RELEASE=.*|SCRIPT_RELEASE=\"$_sv_desc\"|" "$_sv_self" > "$_sv_tmp" \
-    || { rm -f "$_sv_tmp"; echo "stamp-version: could not rewrite the stamp" >&2; exit 1; }
+    || { rm -f "$_sv_tmp"; err 089 "stamp-version: could not rewrite the stamp"; }
   grep -q "^SCRIPT_COMMIT=\"$_sv_sha\"\$" "$_sv_tmp" \
-    || { rm -f "$_sv_tmp"; echo "stamp-version: the rewritten file carries no stamp -- refusing to install it" >&2; exit 1; }
-  mv -f "$_sv_tmp" "$_sv_self" || { rm -f "$_sv_tmp"; echo "stamp-version: could not install the stamped file" >&2; exit 1; }
-  git -C "$_sv_dir" add -- "$(basename "$0")" || { echo "stamp-version: git add failed" >&2; exit 1; }
-  git -C "$_sv_dir" commit -q --amend --no-edit || { echo "stamp-version: git amend failed" >&2; exit 1; }
+    || { rm -f "$_sv_tmp"; err 090 "stamp-version: the rewritten file carries no stamp -- refusing to install it"; }
+  mv -f "$_sv_tmp" "$_sv_self" || { rm -f "$_sv_tmp"; err 091 "stamp-version: could not install the stamped file"; }
+  git -C "$_sv_dir" add -- "$(basename "$0")" || err 087 "stamp-version: git add failed"
+  git -C "$_sv_dir" commit -q --amend --no-edit || err 088 "stamp-version: git amend failed"
   printf 'stamped SCRIPT_COMMIT=%s SCRIPT_RELEASE=%s -- HEAD is now %s\n' \
     "$_sv_sha" "${_sv_desc:-<no tag yet>}" "$(git -C "$_sv_dir" rev-parse --short HEAD)"
 }
