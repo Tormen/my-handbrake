@@ -4,14 +4,19 @@
 
 . "/LINKS/default/my-cmdstrs" || { echo "FAILED [$?] TO ACCESS CMDSTRFILE. EXITING."; exit 1; }
 
-# my-handbrake.conf.GLOBAL; the bare .GLOBAL only until the files are renamed (2026-10-28)
-CONF_FILE_GLOBAL="/LINKS/default/my-handbrake.conf.GLOBAL"
-[ -e "$CONF_FILE_GLOBAL" ] || CONF_FILE_GLOBAL="/LINKS/default/my-handbrake.GLOBAL"
-## both spellings are accepted under /LINKS/default: .conf first, then bare
-CONF_FILE_LOCAL="/LINKS/default/my-handbrake.conf"
-[ -e "$CONF_FILE_LOCAL" ] || CONF_FILE_LOCAL="/LINKS/default/my-handbrake"
-[ -s "$CONF_FILE_GLOBAL" ] && . "$CONF_FILE_GLOBAL"
-[ -s "$CONF_FILE_LOCAL" ] && . "$CONF_FILE_LOCAL"
+# The shared config and this machine's, told apart by where the farm's link
+# points (global/ or local/): right under any name, also while the files are
+# being renamed to my-handbrake.conf (2026-10-28) and one tree is done first.
+CONF_FILE_GLOBAL=""; CONF_FILE_LOCAL=""
+for _f in /LINKS/default/my-handbrake.conf.GLOBAL /LINKS/default/my-handbrake.GLOBAL \
+          /LINKS/default/my-handbrake.conf /LINKS/default/my-handbrake; do
+  case "$(readlink "$_f" 2>/dev/null)" in
+    */global/*) [ -n "$CONF_FILE_GLOBAL" ] || CONF_FILE_GLOBAL="$_f" ;;
+    */local/*)  [ -n "$CONF_FILE_LOCAL" ]  || CONF_FILE_LOCAL="$_f" ;;
+  esac
+done
+[ -n "$CONF_FILE_GLOBAL" ] && [ -s "$CONF_FILE_GLOBAL" ] && . "$CONF_FILE_GLOBAL"
+[ -n "$CONF_FILE_LOCAL" ] && [ -s "$CONF_FILE_LOCAL" ] && . "$CONF_FILE_LOCAL"
 
 DBG="" # can be set via --debug|-D parameter !
 VRB="" # can be set via --verbose|-V parameter !
