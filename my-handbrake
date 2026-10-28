@@ -15,7 +15,9 @@ for _f in /LINKS/default/my-handbrake.conf.GLOBAL /LINKS/default/my-handbrake.GL
     */local/*)  [ -n "$CONF_FILE_LOCAL" ]  || CONF_FILE_LOCAL="$_f" ;;
   esac
 done
+# shellcheck source=/dev/null  # a site file, read at run time
 [ -n "$CONF_FILE_GLOBAL" ] && [ -s "$CONF_FILE_GLOBAL" ] && . "$CONF_FILE_GLOBAL"
+# shellcheck source=/dev/null  # a site file, read at run time
 [ -n "$CONF_FILE_LOCAL" ] && [ -s "$CONF_FILE_LOCAL" ] && . "$CONF_FILE_LOCAL"
 
 DBG="" # can be set via --debug|-D parameter !
