@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# 098 == highest used errCode
+# 099 == highest used errCode
 
 NL="
 "
@@ -12,13 +12,32 @@ err() { local errCode="$1" msg="${2:-Please fix.}" exitCode="${3:-1}"
 
 SITE_CONF="/LINKS/default/site.conf"   # the ONE site path in this tool: read_site
 
+# sh: 0 not there, 1 there ([ -r ] it: unreadable is the error), 2 cannot tell
+site_absent() {
+	_sa_p=$1
+	[ -e "$_sa_p" ] && return 1
+	[ -L "$_sa_p" ] && return 2
+	while :; do
+		_sa_d=$(dirname -- "$_sa_p")
+		[ "$_sa_d" = "$_sa_p" ] && return 0
+		if [ -e "$_sa_d" ] || [ -L "$_sa_d" ]; then
+			[ -d "$_sa_d" ] && [ -x "$_sa_d" ] && return 0
+			return 2
+		fi
+		_sa_p=$_sa_d
+	done
+}
+
 # The site's values for every tool, from SITE_CONF; this tool uses only
 # CONFIG_SEARCH_DIR. Its neutral value comes first, so neither an exported
 # variable nor a missing file takes its place; a file that is there but
-# unreadable is an error, never the neutral value.
+# unreadable, or that cannot be told (a link to nothing, a folder on the way
+# it cannot search), is an error, never the neutral value.
 read_site() {
   CONFIG_SEARCH_DIR=""
-  [ -e "$SITE_CONF" ] || return 0
+  site_absent "$SITE_CONF"; _rs_a=$?
+  [ "$_rs_a" = 0 ] && return 0
+  [ "$_rs_a" = 2 ] && err 099 "cannot tell whether '$SITE_CONF' is there (a link to nothing, or a folder on the way $(id -un) cannot search) -- the site's directories for every tool"
   [ -r "$SITE_CONF" ] || err 096 "cannot read '$SITE_CONF' -- the site's directories for every tool; its group must include $(id -un)"
   # shellcheck source=/dev/null  # the site file, read at run time
   . "$SITE_CONF" || err 097 "'$SITE_CONF' failed to load"
@@ -815,7 +834,7 @@ SCRIPT_NAME="my-handbrake"
 # SCRIPT_RELEASE what 'git describe --tags --long' said then; both are written
 # by 'stamp-version', so a deployed copy with no git can say what it is.
 VERSION=""
-SCRIPT_COMMIT="5310cb8"
+SCRIPT_COMMIT="56f9a0a"
 SCRIPT_RELEASE=""
 
 # The first 12 hex of this file's own SHA-256: the value that identifies the
@@ -927,7 +946,7 @@ _stamp_version() {
 # directory $_rt_dir, prints its evidence as "# ..." lines, and its exit
 # status is the verdict. The output is TAP: the plan first, then one
 # "ok K - name" or "not ok K - name" per test.
-_RT_TESTS="t_every_test_is_listed t_no_site_conf_searches_nowhere t_site_conf_gives_the_search_dir t_site_conf_unreadable_is_an_error"
+_RT_TESTS="t_every_test_is_listed t_no_site_conf_searches_nowhere t_site_conf_gives_the_search_dir t_site_conf_unreadable_is_an_error t_site_conf_cannot_tell_is_an_error"
 
 _run_tests() {
   _rt_sel=""
@@ -994,6 +1013,24 @@ t_site_conf_unreadable_is_an_error() {
   _o=$( (read_site; echo "search='$CONFIG_SEARCH_DIR'") 2>&1); _rc=$?
   printf '# rc %s: %s\n' "$_rc" "$(printf '%s' "$_o" | tr '\n' ' ')"
   [ "$_rc" -ne 0 ] && case "$_o" in *"ERROR 096"*) true ;; *) false ;; esac
+}
+
+# The site file behind a folder it cannot search, or a link to nothing: the
+# run stops with its code ("cannot tell"), never the neutral value -- [ -e ]
+# alone answers "not there" for both. Plainly not there: the neutral value.
+t_site_conf_cannot_tell_is_an_error() {
+  mkdir "$_rt_dir/shut" && printf 'CONFIG_SEARCH_DIR="%s"\n' "$_rt_dir" > "$_rt_dir/shut/site.conf" || return 1
+  ln -s "$_rt_dir/nowhere" "$_rt_dir/dangling.conf" && chmod 000 "$_rt_dir/shut" || return 1
+  _bad=
+  for _c in shut/site.conf dangling.conf; do
+    _o=$( (SITE_CONF="$_rt_dir/$_c"; read_site; echo "search='$CONFIG_SEARCH_DIR'") 2>&1); _rc=$?
+    printf '# %s: rc %s: %s\n' "$_c" "$_rc" "$(printf '%s' "$_o" | tr '\n' ' ')"
+    case "$_rc:$_o" in 1:*"ERROR 099 [1]: cannot tell whether '$_rt_dir/$_c'"*) ;; *) _bad=1 ;; esac
+  done
+  chmod 700 "$_rt_dir/shut"
+  _o=$( (SITE_CONF="$_rt_dir/absent/site.conf"; CONFIG_SEARCH_DIR=/elsewhere; read_site; echo "search='$CONFIG_SEARCH_DIR'") 2>&1)
+  printf '# absent: %s\n' "$_o"
+  [ -z "$_bad" ] && [ "$_o" = "search=''" ]
 }
 
 [ "$1" = "--run-tests" ] && { shift; _run_tests "$@"; exit $?; }
