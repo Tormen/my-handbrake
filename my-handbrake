@@ -1,20 +1,55 @@
 #!/bin/sh
 
-# 075 == highest used errCode
+# 098 == highest used errCode
 
-. "/LINKS/default/my-cmdstrs" || { echo "FAILED [$?] TO ACCESS CMDSTRFILE. EXITING."; exit 1; }
+NL="
+"
 
-# The shared config and this machine's, told apart by where the farm's link
-# points (global/ or local/): right under any name, also while the files are
-# being renamed to my-handbrake.conf (2026-10-28) and one tree is done first.
-CONF_FILE_GLOBAL=""; CONF_FILE_LOCAL=""
-for _f in /LINKS/default/my-handbrake.conf.GLOBAL /LINKS/default/my-handbrake.GLOBAL \
-          /LINKS/default/my-handbrake.conf /LINKS/default/my-handbrake; do
-  case "$(readlink "$_f" 2>/dev/null)" in
-    */global/*) [ -n "$CONF_FILE_GLOBAL" ] || CONF_FILE_GLOBAL="$_f" ;;
-    */local/*)  [ -n "$CONF_FILE_LOCAL" ]  || CONF_FILE_LOCAL="$_f" ;;
-  esac
-done
+err() { local errCode="$1" msg="${2:-Please fix.}" exitCode="${3:-1}"
+    echo "${NL}ERROR $errCode [$exitCode]: $msg" 1>&2;
+    exit "$exitCode";
+}
+
+SITE_CONF="/LINKS/default/site.conf"   # the ONE site path in this tool: read_site
+
+# The site's values for every tool, from SITE_CONF; this tool uses only
+# CONFIG_SEARCH_DIR. Its neutral value comes first, so neither an exported
+# variable nor a missing file takes its place; a file that is there but
+# unreadable is an error, never the neutral value.
+read_site() {
+  CONFIG_SEARCH_DIR=""
+  [ -e "$SITE_CONF" ] || return 0
+  [ -r "$SITE_CONF" ] || err 096 "cannot read '$SITE_CONF' -- the site's directories for every tool; its group must include $(id -un)"
+  # shellcheck source=/dev/null  # the site file, read at run time
+  . "$SITE_CONF" || err 097 "'$SITE_CONF' failed to load"
+}
+
+# The names the configs are searched under: in the site's CONFIG_SEARCH_DIR,
+# nowhere without it.
+config_search_paths() {
+  [ -z "$CONFIG_SEARCH_DIR" ] || printf '%s\n' \
+    "$CONFIG_SEARCH_DIR/my-handbrake.conf.GLOBAL" "$CONFIG_SEARCH_DIR/my-handbrake.GLOBAL" \
+    "$CONFIG_SEARCH_DIR/my-handbrake.conf" "$CONFIG_SEARCH_DIR/my-handbrake"
+}
+
+# Sets CONF_FILE_GLOBAL and CONF_FILE_LOCAL: the shared config and this
+# machine's, told apart by where the search directory's link points (global/
+# or local/) -- right under any of the names, also while the files are being
+# renamed to my-handbrake.conf one tree at a time.
+find_configs() {
+  read_site
+  CONF_FILE_GLOBAL=""; CONF_FILE_LOCAL=""
+  while IFS= read -r _f; do
+    case "$(readlink "$_f" 2>/dev/null)" in
+      */global/*) [ -n "$CONF_FILE_GLOBAL" ] || CONF_FILE_GLOBAL="$_f" ;;
+      */local/*)  [ -n "$CONF_FILE_LOCAL" ]  || CONF_FILE_LOCAL="$_f" ;;
+    esac
+  done <<_EOF
+$(config_search_paths)
+_EOF
+}
+
+find_configs
 # shellcheck source=/dev/null  # a site file, read at run time
 [ -n "$CONF_FILE_GLOBAL" ] && [ -s "$CONF_FILE_GLOBAL" ] && . "$CONF_FILE_GLOBAL"
 # shellcheck source=/dev/null  # a site file, read at run time
@@ -28,9 +63,6 @@ DO_GAP_ANALYSIS=1; # can be unset with --no-gap-analysis parameter!
 
 PWD="$(pwd)" || err 020
 
-NL="
-"
-
 ######################################################################
 
 
@@ -39,11 +71,14 @@ usage() {
 
 This script uses 1st CONF_FILE_GLOBAL = '$CONF_FILE_GLOBAL' - if available.
 This script uses 2nd CONF_FILE_LOCAL = '$CONF_FILE_LOCAL' - if available - allowing to overwrite GLOBAL defaults.
+Both are searched in CONFIG_SEARCH_DIR = '$CONFIG_SEARCH_DIR' from $SITE_CONF (nowhere without it),
+as my-handbrake.conf or my-handbrake; where the link there points (global/ or local/) tells them apart.
 Below we refer to CONF_FILE as either of them.
 
 ______________________________________________________________________________________________________
 [GLOBAL-PARAMETERS]
   --help        Show this text
+  --run-tests [FILTER]  Run the built-in tests (TAP), only those whose name contains FILTER
   -d|--dry      Only PRINT what /woud/ be done
   -D|--debug    To turn on DEBUG mode
   -V|--verbose  To turn on VERBOSE output
@@ -273,12 +308,6 @@ exit 0
 
 dbg() { if [ $DBG ]; then if [ $# -eq 0 ]; then echo 1>&2; else local x_=; for x_ in "$@"; do echo "$x_" 1>&2; done; fi; fi; [ 0 -eq 0 ]; }
 vrb() { if [ $VRB ]; then if [ $# -eq 0 ]; then echo; else local x_=; for x_ in "$@"; do echo "$x_"; done; fi; fi; [ 0 -eq 0 ]; }
-
-
-err() { local errCode="$1"; [ -z "$2" ] && local msg="Please fix." || local msg="$2"; [ -z "$3" ] && local exitCode=1 || local exitCode="$3";
-    echo "${NL}ERROR $errCode [$exitCode]: $msg" 1>&2;
-    exit $exitCode;
-}
 
 
 strip_opt_leading_zero() { [ -n "$1" ] && echo "$1"|sed -e 's/^0*//'; }
@@ -786,7 +815,7 @@ SCRIPT_NAME="my-handbrake"
 # SCRIPT_RELEASE what 'git describe --tags --long' said then; both are written
 # by 'stamp-version', so a deployed copy with no git can say what it is.
 VERSION=""
-SCRIPT_COMMIT="005d280"
+SCRIPT_COMMIT="5310cb8"
 SCRIPT_RELEASE=""
 
 # The first 12 hex of this file's own SHA-256: the value that identifies the
@@ -893,6 +922,82 @@ _stamp_version() {
 }
 
 ###########################################################################
+# --run-tests [FILTER]: the tests, in the order they run; FILTER picks the
+# ones whose name contains it. Each runs in a subshell with its own empty
+# directory $_rt_dir, prints its evidence as "# ..." lines, and its exit
+# status is the verdict. The output is TAP: the plan first, then one
+# "ok K - name" or "not ok K - name" per test.
+_RT_TESTS="t_every_test_is_listed t_no_site_conf_searches_nowhere t_site_conf_gives_the_search_dir t_site_conf_unreadable_is_an_error"
+
+_run_tests() {
+  _rt_sel=""
+  for _rt_t in $_RT_TESTS; do case "$_rt_t" in *"$1"*) _rt_sel="$_rt_sel $_rt_t" ;; esac; done
+  # shellcheck disable=SC2086  # the test names, split on purpose
+  set -- $_rt_sel
+  echo "1..$#"
+  _rt_k=0; _rt_failed=0
+  for _rt_t in "$@"; do
+    _rt_k=$((_rt_k + 1))
+    _rt_dir=$(mktemp -d "${TMPDIR:-/tmp}/my-handbrake.test.XXXXXX") || err 098 "--run-tests: mktemp failed"
+    if ( "$_rt_t" ); then echo "ok $_rt_k - $_rt_t"; else echo "not ok $_rt_k - $_rt_t"; _rt_failed=$((_rt_failed + 1)); fi
+    chmod -R u+rwx "$_rt_dir"; rm -rf "$_rt_dir"
+  done
+  [ "$_rt_failed" -eq 0 ]
+}
+
+# A farm as the site builds it, in $_rt_dir: global/ and local/ hold the
+# configs, farm/ links each of them under the name given.
+_rt_farm() { _rf_global_name="$1"; _rf_local_name="$2"
+  mkdir "$_rt_dir/global" "$_rt_dir/local" "$_rt_dir/farm" || return 1
+  : > "$_rt_dir/global/my-handbrake.conf" && : > "$_rt_dir/local/my-handbrake.conf" || return 1
+  ln -s ../global/my-handbrake.conf "$_rt_dir/farm/$_rf_global_name" || return 1
+  ln -s ../local/my-handbrake.conf "$_rt_dir/farm/$_rf_local_name"
+}
+
+# Every test function this file defines is in the run list, so none is
+# silently never run.
+t_every_test_is_listed() {
+  _defined=$(grep -cE '^t_[a-z_]+\(\) \{' "$0")
+  # shellcheck disable=SC2086  # the test names, split on purpose
+  _listed=$(printf '%s\n' $_RT_TESTS | grep -c .)
+  echo "# defined $_defined, listed $_listed"
+  [ "$_defined" -eq "$_listed" ]
+}
+
+# Without the site file nothing is searched: not this site's search
+# directory, and not one an exported CONFIG_SEARCH_DIR names.
+t_no_site_conf_searches_nowhere() {
+  _rt_farm my-handbrake.conf.GLOBAL my-handbrake.conf || return 1
+  SITE_CONF="$_rt_dir/site.conf"; CONFIG_SEARCH_DIR="$_rt_dir/farm"; export CONFIG_SEARCH_DIR
+  find_configs
+  echo "# search='$CONFIG_SEARCH_DIR' global='$CONF_FILE_GLOBAL' local='$CONF_FILE_LOCAL'"
+  [ -z "$CONFIG_SEARCH_DIR$CONF_FILE_GLOBAL$CONF_FILE_LOCAL" ]
+}
+
+# The site file's CONFIG_SEARCH_DIR is where both configs are found, and the
+# link's target (global/ or local/) says which is which -- here the shared
+# one under the plain name and this machine's under the bare one.
+t_site_conf_gives_the_search_dir() {
+  _rt_farm my-handbrake.conf my-handbrake || return 1
+  printf 'CONFIG_SEARCH_DIR="%s"\n' "$_rt_dir/farm" > "$_rt_dir/site.conf" || return 1
+  SITE_CONF="$_rt_dir/site.conf"
+  find_configs
+  echo "# global='$CONF_FILE_GLOBAL' local='$CONF_FILE_LOCAL'"
+  [ "$CONF_FILE_GLOBAL" = "$_rt_dir/farm/my-handbrake.conf" ] && [ "$CONF_FILE_LOCAL" = "$_rt_dir/farm/my-handbrake" ]
+}
+
+# A site file that is there but unreadable stops the run with its code,
+# instead of quietly searching nowhere.
+t_site_conf_unreadable_is_an_error() {
+  printf 'CONFIG_SEARCH_DIR="%s"\n' "$_rt_dir" > "$_rt_dir/site.conf" && chmod 000 "$_rt_dir/site.conf" || return 1
+  SITE_CONF="$_rt_dir/site.conf"
+  _o=$( (read_site; echo "search='$CONFIG_SEARCH_DIR'") 2>&1); _rc=$?
+  printf '# rc %s: %s\n' "$_rc" "$(printf '%s' "$_o" | tr '\n' ' ')"
+  [ "$_rc" -ne 0 ] && case "$_o" in *"ERROR 096"*) true ;; *) false ;; esac
+}
+
+[ "$1" = "--run-tests" ] && { shift; _run_tests "$@"; exit $?; }
+
 # pre-parsing -- GLOBAL-PARAMETERS LOOP - check only for IMPORTANT global params before actually parsing parameters
   for arg in "$@"; do
     case "$arg" in
