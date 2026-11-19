@@ -13,19 +13,16 @@ err() { local errCode="$1" msg="${2:-Please fix.}" exitCode="${3:-1}"
 SITE_CONF="/LINKS/default/site.conf"   # the ONE site path in this tool: read_site
 
 # sh: 0 not there, 1 there ([ -r ] it: unreadable is the error), 2 cannot tell
+# Judged by the system's own answer, never by mode bits: macOS can refuse a
+# look the bits allow (TCC). On 2, _sa_m says why, for the error message.
 site_absent() {
-	_sa_p=$1
-	[ -e "$_sa_p" ] && return 1
-	[ -L "$_sa_p" ] && return 2
-	while :; do
-		_sa_d=$(dirname -- "$_sa_p")
-		[ "$_sa_d" = "$_sa_p" ] && return 0
-		if [ -e "$_sa_d" ] || [ -L "$_sa_d" ]; then
-			[ -d "$_sa_d" ] && [ -x "$_sa_d" ] && return 0
-			return 2
-		fi
-		_sa_p=$_sa_d
-	done
+	[ -e "$1" ] && return 1
+	_sa_m=$(LC_ALL=C ls -d -- "$1" 2>&1 > /dev/null)
+	case $_sa_m in *": No such file or directory") return 0 ;; esac
+	if [ -n "$_sa_m" ]; then _sa_m="the system says: ${_sa_m##*: }"
+	elif [ -L "$1" ]; then _sa_m="a link to nothing"
+	else _sa_m="listed, but it cannot be looked at"; fi
+	return 2
 }
 
 # The site's values for every tool, from SITE_CONF; this tool uses only
@@ -37,7 +34,7 @@ read_site() {
   CONFIG_SEARCH_DIR=""
   site_absent "$SITE_CONF"; _rs_a=$?
   [ "$_rs_a" = 0 ] && return 0
-  [ "$_rs_a" = 2 ] && err 099 "cannot tell whether '$SITE_CONF' is there (a link to nothing, or a folder on the way $(id -un) cannot search) -- the site's directories for every tool"
+  [ "$_rs_a" = 2 ] && err 099 "cannot tell whether '$SITE_CONF' is there ($_sa_m) -- the site's directories for every tool"
   [ -r "$SITE_CONF" ] || err 096 "cannot read '$SITE_CONF' -- the site's directories for every tool; its group must include $(id -un)"
   # shellcheck source=/dev/null  # the site file, read at run time
   . "$SITE_CONF" || err 097 "'$SITE_CONF' failed to load"
@@ -834,7 +831,7 @@ SCRIPT_NAME="my-handbrake"
 # SCRIPT_RELEASE what 'git describe --tags --long' said then; both are written
 # by 'stamp-version', so a deployed copy with no git can say what it is.
 VERSION=""
-SCRIPT_COMMIT="56f9a0a"
+SCRIPT_COMMIT="3ea4b68"
 SCRIPT_RELEASE=""
 
 # The first 12 hex of this file's own SHA-256: the value that identifies the
@@ -946,7 +943,7 @@ _stamp_version() {
 # directory $_rt_dir, prints its evidence as "# ..." lines, and its exit
 # status is the verdict. The output is TAP: the plan first, then one
 # "ok K - name" or "not ok K - name" per test.
-_RT_TESTS="t_every_test_is_listed t_no_site_conf_searches_nowhere t_site_conf_gives_the_search_dir t_site_conf_unreadable_is_an_error t_site_conf_cannot_tell_is_an_error"
+_RT_TESTS="t_every_test_is_listed t_no_site_conf_searches_nowhere t_site_conf_gives_the_search_dir t_site_conf_unreadable_is_an_error t_site_conf_cannot_tell_is_an_error t_site_conf_refused_by_the_system_is_an_error_whatever_the_mode_bits"
 
 _run_tests() {
   _rt_sel=""
@@ -1031,6 +1028,18 @@ t_site_conf_cannot_tell_is_an_error() {
   _o=$( (SITE_CONF="$_rt_dir/absent/site.conf"; CONFIG_SEARCH_DIR=/elsewhere; read_site; echo "search='$CONFIG_SEARCH_DIR'") 2>&1)
   printf '# absent: %s\n' "$_o"
   [ -z "$_bad" ] && [ "$_o" = "search=''" ]
+}
+# A look the system refuses although the mode bits allow it (macOS TCC): the
+# error names the system's answer, never the neutral value. ls stands in for
+# the kernel's answer.
+t_site_conf_refused_by_the_system_is_an_error_whatever_the_mode_bits() {
+  mkdir "$_rt_dir/refused" "$_rt_dir/fakebin" || return 1
+  # shellcheck disable=SC2016  # $3 belongs to the fake ls, expanded when it runs
+  printf '#!/bin/dash\necho "ls: $3: Operation not permitted" >&2\nexit 1\n' > "$_rt_dir/fakebin/ls" || return 1
+  chmod 755 "$_rt_dir/fakebin/ls" || return 1
+  _o=$( (SITE_CONF="$_rt_dir/refused/site.conf"; PATH="$_rt_dir/fakebin:/usr/bin:/bin" read_site; echo "went on") 2>&1); _rc=$?
+  printf '# rc %s: %s\n' "$_rc" "$(printf '%s' "$_o" | tr '\n' ' ')"
+  case "$_rc:$_o" in 1:*"ERROR 099 [1]: cannot tell whether '$_rt_dir/refused/site.conf' is there (the system says: Operation not permitted)"*) ;; *) return 1 ;; esac
 }
 
 [ "$1" = "--run-tests" ] && { shift; _run_tests "$@"; exit $?; }
